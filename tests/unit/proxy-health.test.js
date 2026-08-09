@@ -69,7 +69,7 @@ describe("proxy health: circuit breaker + metrics", () => {
   it("auto-test tick marks dead pool in cooldown and revives healthy one", async () => {
     repoMock.getProxyPools.mockResolvedValue([
       { id: "dead", isActive: true, consecutiveFailures: 1, successCount: 0, requestCount: 0, failCount: 0 },
-      { id: "alive", isActive: true, consecutiveFailures: 5, successCount: 1, requestCount: 1, failCount: 2, cooldownUntil: "x", latencySamples: 0 },
+      { id: "alive", isActive: true, consecutiveFailures: 5, successCount: 1, requestCount: 1, failCount: 2, cooldownUntil: "x", latencySamples: 0, latencyHistory: [] },
     ]);
     const connectivityTest = vi
       .fn()
@@ -86,6 +86,8 @@ describe("proxy health: circuit breaker + metrics", () => {
     expect(aliveUpdate.testStatus).toBe("active");
     expect(aliveUpdate.cooldownUntil).toBeNull();
     expect(aliveUpdate.consecutiveFailures).toBe(0);
+    // latencyHistory should be updated on successful test
+    expect(aliveUpdate.latencyHistory).toEqual([50]);
   });
 
   it("getPoolProxyOptions picks a healthy pool and skips cooldown ones", async () => {

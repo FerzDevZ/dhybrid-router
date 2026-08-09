@@ -95,13 +95,17 @@ function getLogger() {
   return loggerPromise;
 }
 
-const webhookUrl = isNonServerRuntime() ? "" : process.env.PROXY_WEBHOOK_URL || "";
+// Read lazily so env changes at server start (not module load) take effect.
+function getWebhookUrl() {
+  return isNonServerRuntime() ? "" : process.env.PROXY_WEBHOOK_URL || "";
+}
 
 /**
  * Optional webhook notification (F3) — fail-open, 5s timeout.
  * Payload: { event: "pool.cooldown", poolId, name, failures, cooldownMs, error }
  */
 async function sendWebhook(payload) {
+  const webhookUrl = getWebhookUrl();
   if (!webhookUrl) return;
   try {
     const controller = new AbortController();
@@ -203,6 +207,11 @@ export async function reportProxyFailure(poolId, errorText) {
     });
     if (failures === COOLDOWN_THRESHOLD) {
       await notifyPoolCooldown({ ...pool, consecutiveFailures: failures }, cooldownMs, errorText);
+      // Same auto-unbind semantics as the tick path: a pool that first crosses
+      // the threshold via live traffic must be detached too, or it never is.
+      if (pool.autoUnbind !== false) {
+        await autoUnbindPool(pool.id, pool.name);
+      }
     }
   } catch (e) {
     console.warn("[ProxyHealth] reportProxyFailure failed (swallowed):", e?.message ?? e);
@@ -346,6 +355,7 @@ export async function runProxyHealthTick({ connectivityTest } = {}) {
               requestCount: (pool.requestCount || 0) + 1,
               avgLatencyMs: pushAvgLatency(pool.avgLatencyMs, pool.latencySamples, result.elapsedMs),
               latencySamples: Math.min((pool.latencySamples || 0) + 1, MAX_LATENCY_SAMPLES),
+              latencyHistory: [...(pool.latencyHistory || []).slice(-99), Math.round(result.elapsedMs)], // F1 sparkline
             });
           } else {
             const failures = (pool.consecutiveFailures || 0) + 1;
@@ -354,6 +364,7 @@ export async function runProxyHealthTick({ connectivityTest } = {}) {
               testStatus: "error",
               lastTestedAt: new Date().toISOString(),
               lastError: result.error || `Proxy test failed with status ${result.status}`,
+              lastErrorAt: new Date().toISOString(),
               failCount: (pool.failCount || 0) + 1,
               requestCount: (pool.requestCount || 0) + 1,
               consecutiveFailures: failures,
