@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  lint-and-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            tests/package-lock.json
+
+      - name: Install root deps
+        run: npm ci
+
+      - name: Lint (core engine, zero-error baseline)
+        run: npx eslint src/lib src/sse open-sse
+
+      - name: Install tests deps
+        working-directory: tests
+        run: npm ci
+
+      - name: Unit tests (stable subset)
+        working-directory: tests
+        run: npx vitest run unit/combo-routing.test.js unit/combo-fusion.test.js unit/rate-limit.test.js unit/error-classification.test.js unit/account-score.test.js

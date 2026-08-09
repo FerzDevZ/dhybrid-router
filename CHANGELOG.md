@@ -1,3 +1,28 @@
+# v0.6.0 (2026-08-09)
+
+## Features
+- **Proxy pools**: per-pool health checker (HTTP/SOCKS5 probe), failover across
+  pools, persistent round-robin, pool scoring, CSV import/export and a
+  proxy-health API with cooldown management
+- **API-key throttling**: fixed-window rate limit (RPM) + persistent daily quota
+  per API key with `429` + `Retry-After`; admin-configurable, fail-open
+- **Error classification**: permanent client/model faults (400/404/406,
+  model-not-found text) no longer burn account fallback or lock accounts;
+  401/429/5xx keep account-level fallback
+- **Adaptive account selection**: fill-first now tie-breaks by a learned success
+  rate (kv-persisted, neutral baseline until 5 samples)
+- **Combo memory**: last-known-good model is tried first on subsequent requests
+  (fallback strategy; round-robin keeps its own rotation)
+- **Usage stats**: latency percentiles (p50/p90/p95/p99) + error rate surfaced in
+  the usage dashboard; failed requests (provider errors) now counted in history
+- **Notifications**: optional webhook for account locks, provider-wide outage,
+  API-key limit hits and all-accounts-failed exits (throttled, fail-open)
+- **Tracing**: every response carries `x-9r-request-id` (also in request logs)
+
+## Docker
+- Publish image to `ghcr.io/<owner>/dhybrid-router` and Docker Hub
+  `ferzdevz/dhybrid-router` on `v*` tags
+
 # v0.5.50 (2026-08-05)
 
 ## Features
