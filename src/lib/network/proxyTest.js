@@ -1,6 +1,6 @@
 import { ProxyAgent, fetch as undiciFetch } from "undici";
 
-const DEFAULT_TEST_URL = "https://google.com/";
+const DEFAULT_TEST_URL = "https://example.com/";
 const DEFAULT_TIMEOUT_MS = 8000;
 
 function getErrorMessage(err) {
@@ -62,7 +62,9 @@ async function testViaSocks(proxyUrl, testUrl, timeoutMs) {
       (res) => {
         clearTimeout(timer);
         res.resume();
-        resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, statusText: res.statusMessage, url: testUrl, elapsedMs: Date.now() - startedAt });
+        // Accept 2xx and 3xx (redirects mean connection works, target just moved)
+        const ok = res.statusCode >= 200 && res.statusCode < 400;
+        resolve({ ok, status: res.statusCode, statusText: res.statusMessage, url: testUrl, elapsedMs: Date.now() - startedAt });
       }
     );
 
@@ -122,8 +124,11 @@ export async function testProxyUrl({ proxyUrl, testUrl, timeoutMs } = {}) {
         },
       });
 
+      // Accept 2xx and 3xx (redirects mean connection works, target just moved)
+      const ok = res.status >= 200 && res.status < 400;
+
       return {
-        ok: res.ok,
+        ok,
         status: res.status,
         statusText: res.statusText,
         url: normalizedTestUrl,
