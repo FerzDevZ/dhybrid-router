@@ -73,6 +73,7 @@ function normalizeFormData(data = {}) {
     weight: data.weight ?? 0,
     tags: data.tags || "",
     autoUnbind: data.autoUnbind !== false,
+    autoDelete: data.autoDelete === true,
   };
 }
 
@@ -194,6 +195,7 @@ export default function ProxyPoolsPage() {
       weight: Math.min(100, Math.max(0, Math.floor(Number(formData.weight) || 0))),
       tags: formData.tags.trim(),
       autoUnbind: formData.autoUnbind === true,
+      autoDelete: formData.autoDelete === true,
     };
 
     if (!payload.name || !payload.proxyUrl) return;
@@ -645,6 +647,11 @@ export default function ProxyPoolsPage() {
     [proxyPools]
   );
 
+  const autoDeleteCount = useMemo(
+    () => proxyPools.filter((pool) => pool.autoDelete === true).length,
+    [proxyPools]
+  );
+
   const allTags = useMemo(() => {
     const set = new Set();
     proxyPools.forEach((p) => (p.tags || "").split(",").map((t) => t.trim()).filter(Boolean).forEach((t) => set.add(t)));
@@ -815,6 +822,11 @@ export default function ProxyPoolsPage() {
               })(),
               cls: "",
             },
+            {
+              label: "Auto-delete",
+              value: autoDeleteCount,
+              cls: "text-blue-600",
+            },
           ].map((s) => (
             <div key={s.label} className="rounded-lg border border-black/5 dark:border-white/10 bg-black/[0.02] dark:bg-white/[0.03] px-3 py-2">
               <p className="text-[11px] text-text-muted">{s.label}</p>
@@ -939,6 +951,11 @@ export default function ProxyPoolsPage() {
                     )}
                     {pool.allowFallbackDirect === false && (
                       <Badge variant="error" size="sm">no direct fallback</Badge>
+                    )}
+                    {pool.autoDelete === true && (
+                      <Badge variant="default" size="sm" style={{ backgroundColor: "#eff6ff", color: "#2563eb" }}>
+                        auto-delete
+                      </Badge>
                     )}
                     {(pool.tags || "").split(",").map((t) => t.trim()).filter(Boolean).map((t) => (
                       <Badge key={t} variant="default" size="sm">#{t}</Badge>
@@ -1357,6 +1374,18 @@ export default function ProxyPoolsPage() {
             <Toggle
               checked={formData.autoUnbind === true}
               onChange={() => setFormData((prev) => ({ ...prev, autoUnbind: !prev.autoUnbind }))}
+              disabled={saving}
+            />
+          </div>
+
+          <div className="flex flex-col gap-3 rounded-lg border border-border/50 p-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="font-medium text-sm">Auto-delete when dead</p>
+              <p className="text-xs text-text-muted">Permanently delete this pool after 3 consecutive cooldowns + 24h grace period.</p>
+            </div>
+            <Toggle
+              checked={formData.autoDelete === true}
+              onChange={() => setFormData((prev) => ({ ...prev, autoDelete: !prev.autoDelete }))}
               disabled={saving}
             />
           </div>

@@ -23,6 +23,8 @@ function normalizeProxyPoolInput(body = {}) {
   const weight = Number.isInteger(body?.weight) && body.weight >= 1 && body.weight <= 100 ? body.weight : 0;
   const tags = typeof body?.tags === "string" ? body.tags.trim() : "";
   const autoUnbind = body?.autoUnbind === undefined ? true : body.autoUnbind === true;
+  const autoDelete = body?.autoDelete === true;
+  const geolocation = body?.geolocation && typeof body.geolocation === "object" ? body.geolocation : null;
 
   if (!name) {
     return { error: "Name is required" };
@@ -32,7 +34,7 @@ function normalizeProxyPoolInput(body = {}) {
     return { error: "Proxy URL is required" };
   }
 
-  return { name, proxyUrl, noProxy, isActive, strictProxy, type, maxFailover, allowFallbackDirect, priority, maxConcurrency, weight, tags, autoUnbind };
+  return { name, proxyUrl, noProxy, isActive, strictProxy, type, maxFailover, allowFallbackDirect, priority, maxConcurrency, weight, tags, autoUnbind, autoDelete, geolocation };
 }
 
 export { normalizeProxyPoolInput };

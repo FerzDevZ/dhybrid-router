@@ -392,6 +392,11 @@ export default function ProviderDetailPage() {
     }
   };
 
+  const handleStrategyChange = (strategy) => {
+    setProviderStrategy(strategy);
+    saveProviderStrategy(strategy === "" ? null : strategy, strategy === "round-robin" ? providerStickyLimit : "");
+  };
+
   const handleRoundRobinToggle = (enabled) => {
     const strategy = enabled ? "round-robin" : null;
     const sticky = enabled ? (providerStickyLimit || "1") : providerStickyLimit;
@@ -1468,13 +1473,22 @@ export default function ProviderDetailPage() {
                   )}
                 </>
               )}
-              {/* Round Robin toggle */}
+              {/* Fallover Strategy selector */}
               <div className="flex flex-wrap items-center gap-2">
-                <span className="text-xs text-text-muted font-medium">Round Robin</span>
-                <Toggle
-                  checked={providerStrategy === "round-robin"}
-                  onChange={handleRoundRobinToggle}
-                />
+                <span className="text-xs text-text-muted font-medium">Failover Strategy</span>
+                <select
+                  value={providerStrategy || ""}
+                  onChange={(e) => handleStrategyChange(e.target.value)}
+                  className="px-2 py-1 text-xs border border-border rounded-md bg-background focus:outline-none focus:border-primary"
+                  style={{ minWidth: "140px" }}
+                >
+                  <option value="">Global default</option>
+                  <option value="round-robin">Round Robin</option>
+                  <option value="weighted">Weighted (health score)</option>
+                  <option value="smart">Smart (latency + success + recency + geo)</option>
+                  <option value="random">Random</option>
+                  <option value="none">Single (first healthy)</option>
+                </select>
                 {providerStrategy === "round-robin" && (
                   <div className="flex items-center gap-1.5">
                     <span className="text-xs text-text-muted">Sticky:</span>

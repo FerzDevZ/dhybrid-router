@@ -65,6 +65,18 @@ function normalizeProxyPoolUpdate(body = {}) {
     updates.weight = Number.isInteger(body?.weight) && body.weight >= 1 && body.weight <= 100 ? body.weight : 0;
   }
 
+  if (Object.prototype.hasOwnProperty.call(body, "autoDelete")) {
+    updates.autoDelete = body?.autoDelete === true;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "geolocation")) {
+    if (body.geolocation && typeof body.geolocation === "object") {
+      updates.geolocation = body.geolocation;
+    } else {
+      updates.geolocation = null;
+    }
+  }
+
   if (Object.prototype.hasOwnProperty.call(body, "type")) {
     const validTypes = ["http", "vercel", "cloudflare"];
     updates.type = validTypes.includes(body?.type) ? body.type : "http";

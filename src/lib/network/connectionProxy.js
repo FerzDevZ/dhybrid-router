@@ -47,6 +47,8 @@ async function saveRotationState(providerId, state) {
  *
  * round-robin: cycle sequentially (persistent cursor in kv, throttled writes)
  * random:      uniform random pick
+ * weighted:    health-score biased (success rate + latency + manual weight)
+ * smart:       multi-factor (latency + success rate + recency + geo proximity)
  * none/single: return first healthy entry
  */
 export async function pickProxyPoolId(poolIds, strategy, providerId) {
@@ -93,6 +95,69 @@ export async function pickProxyPoolId(poolIds, strategy, providerId) {
       /* fail-open: uniform pick below */
     }
     return scored[Math.floor(Math.random() ** 2 * scored.length)].id;
+  }
+
+  if (strategy === "smart") {
+    // Smart strategy: combine latency, success rate, recency, and geo proximity
+    // All normalized to 0-1, higher = better
+    try {
+      const {
+        PROXY_SMART_LATENCY_WEIGHT = 0.3,
+        PROXY_SMART_SUCCESS_WEIGHT = 0.35,
+        PROXY_SMART_RECENCY_WEIGHT = 0.2,
+        PROXY_SMART_GEO_WEIGHT = 0.15,
+        PROXY_MAX_ACCEPTABLE_LATENCY_MS = 5000,
+        PROXY_RECENCY_WINDOW_MS = 60 * 60 * 1000, // 1 hour
+      } = process.env;
+
+      const latencyWeight = Number(PROXY_SMART_LATENCY_WEIGHT);
+      const successWeight = Number(PROXY_SMART_SUCCESS_WEIGHT);
+      const recencyWeight = Number(PROXY_SMART_RECENCY_WEIGHT);
+      const geoWeight = Number(PROXY_SMART_GEO_WEIGHT);
+      const maxLatency = Number(PROXY_MAX_ACCEPTABLE_LATENCY_MS);
+      const recencyWindow = Number(PROXY_RECENCY_WINDOW_MS);
+
+      const now = Date.now();
+      const targetRegion = process.env.PROXY_TARGET_REGION || ""; // Optional: preferred region
+
+      const scored = candidates.map((id) => {
+        const pool = poolsById.get(id) || {};
+        const total = (pool.successCount || 0) + (pool.failCount || 0);
+        const successRate = total > 0 ? (pool.successCount || 0) / total : 0.5;
+        const latency = pool.avgLatencyMs || maxLatency;
+        const lastSuccess = pool.lastTestedAt ? new Date(pool.lastTestedAt).getTime() : 0;
+        const timeSinceSuccess = now - lastSuccess;
+        const geo = pool.geolocation || {};
+
+        // Normalize each factor to 0-1 (higher = better)
+        const normLatency = Math.max(0, 1 - latency / maxLatency);
+        const normSuccess = successRate;
+        const normRecency = Math.max(0, 1 - timeSinceSuccess / recencyWindow);
+        let normGeo = 0.5; // neutral default
+        if (targetRegion && geo.country) {
+          normGeo = geo.country.toLowerCase() === targetRegion.toLowerCase() ? 1 : 0.2;
+        }
+
+        const score =
+          latencyWeight * normLatency +
+          successWeight * normSuccess +
+          recencyWeight * normRecency +
+          geoWeight * normGeo;
+
+        return { id, score };
+      });
+
+      scored.sort((a, b) => b.score - a.score);
+      // Add slight randomness to avoid thundering herd (bias toward top)
+      return scored[Math.floor(Math.random() ** 1.5 * scored.length)].id;
+    } catch {
+      /* fail-open: fall back to weighted */
+      const { computePoolScore } = await import("./proxyHealth.js");
+      const scored = candidates
+        .map((id) => ({ id, score: computePoolScore(poolsById.get(id) || {}) }))
+        .sort((a, b) => b.score - a.score);
+      return scored[Math.floor(Math.random() ** 2 * scored.length)].id;
+    }
   }
 
   if (strategy === "random") {

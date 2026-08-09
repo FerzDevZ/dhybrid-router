@@ -10,17 +10,21 @@ function rowToPool(row) {
     id: row.id,
     isActive: row.isActive === 1 || row.isActive === true,
     testStatus: row.testStatus,
+    autoDelete: row.autoDelete === 1 || row.autoDelete === true,
+    geolocation: parseJson(row.geolocation, null),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
 }
 
 function poolToRow(p) {
-  const { id, isActive, testStatus, createdAt, updatedAt, ...rest } = p;
+  const { id, isActive, testStatus, autoDelete, geolocation, createdAt, updatedAt, ...rest } = p;
   return {
     id,
     isActive: isActive === false ? 0 : 1,
     testStatus: testStatus ?? null,
+    autoDelete: autoDelete === false ? 0 : (autoDelete === true ? 1 : 0),
+    geolocation: geolocation ? stringifyJson(geolocation) : null,
     data: stringifyJson(rest),
     createdAt,
     updatedAt,
@@ -30,12 +34,13 @@ function poolToRow(p) {
 function upsert(db, p) {
   const r = poolToRow(p);
   db.run(
-    `INSERT INTO proxyPools(id, isActive, testStatus, data, createdAt, updatedAt)
-     VALUES(?, ?, ?, ?, ?, ?)
+    `INSERT INTO proxyPools(id, isActive, testStatus, autoDelete, geolocation, data, createdAt, updatedAt)
+     VALUES(?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        isActive=excluded.isActive, testStatus=excluded.testStatus,
+       autoDelete=excluded.autoDelete, geolocation=excluded.geolocation,
        data=excluded.data, updatedAt=excluded.updatedAt`,
-    [r.id, r.isActive, r.testStatus, r.data, r.createdAt, r.updatedAt]
+    [r.id, r.isActive, r.testStatus, r.autoDelete, r.geolocation, r.data, r.createdAt, r.updatedAt]
   );
 }
 
@@ -67,6 +72,9 @@ export async function createProxyPool(data) {
     type: data.type || "http",
     isActive: data.isActive !== undefined ? data.isActive : true,
     strictProxy: data.strictProxy === true,
+    // Auto-delete
+    autoDelete: data.autoDelete === true,
+    geolocation: data.geolocation || null,
     // Failover + fallback policy
     maxFailover: data.maxFailover ?? 2,
     allowFallbackDirect: data.allowFallbackDirect !== false,

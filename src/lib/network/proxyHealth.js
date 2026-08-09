@@ -12,6 +12,10 @@ const MONITOR_INTERVAL_MS = 60 * 1000;
 const INITIAL_DELAY_MS = 15 * 1000;
 const MAX_LATENCY_SAMPLES = 50;
 
+// Auto-delete configuration
+const AUTO_DELETE_THRESHOLD = Number(process.env.PROXY_AUTO_DELETE_THRESHOLD) || 3; // consecutive cooldown entries before deletion
+const AUTO_DELETE_GRACE_MS = Number(process.env.PROXY_AUTO_DELETE_GRACE_MS) || 24 * 60 * 60 * 1000; // 24h grace after last cooldown
+
 let started = false;
 let intervalHandle = null;
 let initialTimeoutHandle = null;
@@ -326,6 +330,46 @@ export async function testProxyPoolConnectivity(pool) {
 }
 
 /**
+ * Auto-delete dead pools that have exceeded the threshold and grace period.
+ * Only deletes pools with autoDelete=true that have been in cooldown long enough.
+ * Runs at the end of each health tick.
+ */
+async function autoDeleteDeadPools() {
+  if (isTruthyEnv(process.env.DISABLE_PROXY_AUTO_DELETE)) return;
+  try {
+    const { getProxyPools, deleteProxyPool } = await loadRepo();
+    const pools = await getProxyPools({ isActive: true });
+    const now = Date.now();
+    let deletedCount = 0;
+
+    for (const pool of pools) {
+      if (!pool.autoDelete) continue;
+      const failures = pool.consecutiveFailures || 0;
+      if (failures < AUTO_DELETE_THRESHOLD) continue;
+
+      const cooldownEnd = parseMs(pool.cooldownUntil);
+      if (!cooldownEnd) continue;
+      const timeSinceCooldown = now - cooldownEnd;
+      if (timeSinceCooldown < AUTO_DELETE_GRACE_MS) continue;
+
+      // Delete the pool
+      await deleteProxyPool(pool.id);
+      deletedCount += 1;
+
+      const log = await getLogger();
+      log?.warn?.("PROXY", `Auto-deleted dead pool ${pool.name || pool.id} (${failures} failures, cooldown ended ${Math.round(timeSinceCooldown / 1000)}s ago)`);
+    }
+
+    if (deletedCount > 0) {
+      const log = await getLogger();
+      log?.warn?.("PROXY", `Auto-deleted ${deletedCount} dead pool(s)`);
+    }
+  } catch (e) {
+    console.warn("[ProxyHealth] autoDeleteDeadPools failed (swallowed):", e?.message ?? e);
+  }
+}
+
+/**
  * One scheduler tick: auto-test all active pools, update status/metrics,
  * and let healthy results clear cooldown state. Fail-open per pool.
  * `connectivityTest` is injectable for tests (defaults to the real test fn).
@@ -392,6 +436,10 @@ export async function runProxyHealthTick({ connectivityTest } = {}) {
     console.warn("[ProxyHealth] tick failed (swallowed):", e?.message ?? e);
   } finally {
     tickRunning = false;
+    // Auto-delete dead pools after health checks complete
+    autoDeleteDeadPools().catch((e) =>
+      console.warn("[ProxyHealth] autoDeleteDeadPools rejected (swallowed):", e?.message ?? e)
+    );
   }
 }
 
