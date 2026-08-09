@@ -9,7 +9,7 @@ import {
   recordAccountSuccess,
 } from "../services/auth.js";
 import { getSettings } from "@/lib/localDb";
-import { checkKeyRateLimit, checkDailyQuota } from "@/lib/rateLimit";
+import { checkApiLimits, rateLimitResponse } from "@/lib/rateLimit";
 import { sendNotification } from "@/lib/notifications";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
@@ -25,17 +25,6 @@ import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
-
-function rateLimitResponse(retryAfterSec, message) {
-  return new Response(JSON.stringify({ error: { message, type: "rate_limit_error", code: "rate_limit_exceeded" } }), {
-    status: HTTP_STATUS.RATE_LIMITED,
-    headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-      "Retry-After": String(retryAfterSec),
-    },
-  });
-}
 
 /**
  * Handle chat completion request
@@ -102,17 +91,14 @@ async function handleChatInner(request, clientRawRequest = null, requestId = nul
 
   // Per-key throttle — rate limit (RPM window) + daily quota; only when a key is presented
   if (apiKey) {
-    const rl = checkKeyRateLimit(apiKey, settings.apiKeyRateLimit || {});
-    if (!rl.allowed) {
-      log.warn("AUTH", `API key rate limited (${settings.apiKeyRateLimit?.rpm || 60}/min)`);
-      sendNotification("api_key_limited", { apiKey: log.maskKey(apiKey), reason: "rate_limit", retryAfterSec: rl.retryAfterSec }).catch(() => {});
-      return rateLimitResponse(rl.retryAfterSec, "Rate limit exceeded for this API key");
-    }
-    const quota = await checkDailyQuota(apiKey, settings.apiKeyDailyQuota || {});
-    if (!quota.allowed) {
-      log.warn("AUTH", `API key daily quota reached (${quota.used}/${quota.limit})`);
-      sendNotification("api_key_limited", { apiKey: log.maskKey(apiKey), reason: "daily_quota", used: quota.used, limit: quota.limit }).catch(() => {});
-      return rateLimitResponse(86400, "Daily quota exceeded for this API key");
+    const limit = await checkApiLimits(apiKey, settings);
+    if (!limit.allowed) {
+      log.warn("AUTH", limit.reason === "rate_limit"
+        ? `API key rate limited (${settings.apiKeyRateLimit?.rpm || 60}/min)`
+        : `API key daily quota reached (${limit.used}/${limit.limit})`);
+      return rateLimitResponse(limit.retryAfterSec, limit.reason === "rate_limit"
+        ? "Rate limit exceeded for this API key"
+        : "Daily quota exceeded for this API key");
     }
   }
 

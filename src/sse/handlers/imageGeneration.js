@@ -6,6 +6,7 @@ import {
   isValidApiKey,
 } from "../services/auth.js";
 import { getSettings } from "@/lib/localDb";
+import { checkApiLimits, rateLimitResponse } from "@/lib/rateLimit";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleImageGenerationCore } from "open-sse/handlers/imageGenerationCore.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
@@ -41,6 +42,16 @@ export async function handleImageGeneration(request) {
     if (!apiKey) return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Missing API key");
     const valid = await isValidApiKey(apiKey);
     if (!valid) return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key");
+  }
+
+  // Per-key throttle — same gate as chat & embeddings
+  if (apiKey) {
+    const limit = await checkApiLimits(apiKey, settings);
+    if (!limit.allowed) {
+      return rateLimitResponse(limit.retryAfterSec, limit.reason === "rate_limit"
+        ? "Rate limit exceeded for this API key"
+        : "Daily quota exceeded for this API key");
+    }
   }
 
   if (!modelStr) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model");

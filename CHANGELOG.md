@@ -23,6 +23,11 @@
 - Publish image to `ghcr.io/<owner>/dhybrid-router` and Docker Hub
   `ferzdevz/dhybrid-router` on `v*` tags
 
+## Fixed
+- Per-key rate limit & daily quota now also cover embeddings, image and video
+  generation endpoints (previously only chat)
+- Golden `User-Agent` snapshots refreshed for the `9Router/0.6.0` version string
+
 # v0.5.50 (2026-08-05)
 
 ## Features

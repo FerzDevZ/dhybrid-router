@@ -6,6 +6,7 @@ import {
   isValidApiKey,
 } from "../services/auth.js";
 import { getSettings } from "@/lib/localDb";
+import { checkApiLimits, rateLimitResponse } from "@/lib/rateLimit";
 import { getModelInfo } from "../services/model.js";
 import { handleEmbeddingsCore } from "open-sse/handlers/embeddingsCore.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
@@ -62,6 +63,19 @@ export async function handleEmbeddings(request) {
     if (!valid) {
       log.warn("AUTH", "Invalid API key (requireApiKey=true)");
       return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key");
+    }
+  }
+
+  // Per-key throttle — same gate as chat & images
+  if (apiKey) {
+    const limit = await checkApiLimits(apiKey, settings);
+    if (!limit.allowed) {
+      log.warn("AUTH", limit.reason === "rate_limit"
+        ? `API key rate limited (${settings.apiKeyRateLimit?.rpm || 60}/min)`
+        : `API key daily quota reached (${limit.used}/${limit.limit})`);
+      return rateLimitResponse(limit.retryAfterSec, limit.reason === "rate_limit"
+        ? "Rate limit exceeded for this API key"
+        : "Daily quota exceeded for this API key");
     }
   }
 
