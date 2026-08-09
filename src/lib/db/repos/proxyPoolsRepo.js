@@ -67,9 +67,26 @@ export async function createProxyPool(data) {
     type: data.type || "http",
     isActive: data.isActive !== undefined ? data.isActive : true,
     strictProxy: data.strictProxy === true,
+    // Failover + fallback policy
+    maxFailover: data.maxFailover ?? 2,
+    allowFallbackDirect: data.allowFallbackDirect !== false,
+    priority: data.priority ?? 50,
+    maxConcurrency: data.maxConcurrency ?? 0,
+    weight: data.weight ?? 0,
+    // Labels + safety
+    tags: data.tags || "",
+    autoUnbind: data.autoUnbind !== false,
     testStatus: data.testStatus || "unknown",
     lastTestedAt: data.lastTestedAt || null,
     lastError: data.lastError || null,
+    // Health metrics (circuit breaker + observability)
+    requestCount: data.requestCount || 0,
+    successCount: data.successCount || 0,
+    failCount: data.failCount || 0,
+    avgLatencyMs: data.avgLatencyMs ?? null,
+    lastLatencyMs: data.lastLatencyMs ?? null,
+    consecutiveFailures: data.consecutiveFailures || 0,
+    cooldownUntil: data.cooldownUntil || null,
     createdAt: now,
     updatedAt: now,
   };

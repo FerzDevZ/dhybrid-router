@@ -5,6 +5,20 @@ import { dbg } from "./debugLog.js";
 const originalFetch = globalThis.fetch;
 const proxyDispatchers = new Map();
 
+// Lazy-loaded so this module has no static dependency on src/ (keeps it
+// importable from Next bundle, tests, and standalone CLI alike). Fail-open.
+let proxyHealthPromise = null;
+function getProxyHealth() {
+  if (!proxyHealthPromise) {
+    proxyHealthPromise = import("../../src/lib/network/proxyHealth.js").catch((e) => {
+      proxyHealthPromise = null; // allow retry on next call
+      console.warn("[ProxyFetch] proxyHealth import failed (metrics disabled):", e?.message ?? e);
+      return null;
+    });
+  }
+  return proxyHealthPromise;
+}
+
 // ─── TLS fingerprinting via got-scraping (browser-like JA3) ───────────────
 // Disabled: not in use. Kept commented for future re-enable.
 // Restore the original block to re-enable per-host JA3 spoofing.
@@ -215,10 +229,13 @@ function resolveConnectionProxyUrl(targetUrl, proxyOptions) {
 
 /**
  * Create proxy dispatcher lazily (undici-compatible)
+ * SOCKS proxies get a socks-proxy-agent-based fetch (undici has no SOCKS dispatcher).
  */
 async function getDispatcher(proxyUrl) {
   const normalized = normalizeProxyUrl(proxyUrl);
   if (!normalized) return null;
+
+  if (isSocksUrl(normalized)) return { socks: normalized };
 
   if (!proxyDispatchers.has(normalized)) {
     // Evict oldest entry if max size reached
@@ -230,6 +247,114 @@ async function getDispatcher(proxyUrl) {
   }
 
   return proxyDispatchers.get(normalized);
+}
+
+function isSocksUrl(proxyUrl) {
+  return /^socks(4|4a|5|5h)?:\/\//i.test(normalizeString(proxyUrl));
+}
+
+// ── Per-pool concurrency semaphore (E3) ─────────────────────────
+const poolSlots = new Map(); // poolId -> { inflight, waiters }
+
+async function acquireSlot(poolId, max) {
+  if (!poolId || !max || max < 1) return;
+  let entry = poolSlots.get(poolId);
+  if (!entry) {
+    entry = { inflight: 0, waiters: [] };
+    poolSlots.set(poolId, entry);
+  }
+  if (entry.inflight < max) {
+    entry.inflight += 1;
+    return;
+  }
+  await new Promise((resolve) => {
+    entry.waiters.push({ resolve });
+  });
+  entry.inflight += 1; // slot granted by releaseSlot
+}
+
+function releaseSlot(poolId) {
+  if (!poolId) return;
+  const entry = poolSlots.get(poolId);
+  if (!entry) return;
+  const waiter = entry.waiters.shift();
+  if (waiter) {
+    waiter.resolve(); // pass the slot straight to the next waiter
+    return;
+  }
+  entry.inflight -= 1;
+  if (entry.inflight <= 0) poolSlots.delete(poolId);
+}
+
+// ── Reused keep-alive SOCKS agents (G1) ─────────────────────────
+const socksAgents = new Map(); // socksUrl -> SocksProxyAgent
+const SOCKS_CONN_ERRORS = new Set(["ECONNRESET", "EPIPE", "ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND", "EHOSTUNREACH", "ENETUNREACH"]);
+
+function getSocksAgent(socksUrl, SocksProxyAgentCtor) {
+  let agent = socksAgents.get(socksUrl);
+  if (!agent) {
+    agent = new SocksProxyAgentCtor(socksUrl, { keepAlive: true });
+    if (socksAgents.size >= MEMORY_CONFIG.proxyDispatchersMaxSize) {
+      const firstKey = socksAgents.keys().next().value;
+      if (firstKey !== undefined) socksAgents.delete(firstKey);
+    }
+    socksAgents.set(socksUrl, agent);
+  }
+  return agent;
+}
+
+function evictSocksAgent(socksUrl) {
+  socksAgents.delete(socksUrl);
+}
+
+/**
+ * Fetch through a SOCKS proxy via node http(s).request + SocksProxyAgent.
+ * Response shape mirrors what undici fetch returns for the parts we use.
+ */
+async function socksFetch(targetUrl, options, socksUrl) {
+  const { SocksProxyAgent } = await import("socks-proxy-agent");
+  const httpsModule = await import("https");
+  const httpModule = await import("http");
+  const https = httpsModule.default ?? httpsModule;
+  const http = httpModule.default ?? httpModule;
+
+  const urlObj = new URL(targetUrl);
+  const agent = getSocksAgent(socksUrl, SocksProxyAgent);
+
+  return new Promise((resolve, reject) => {
+    const req = (urlObj.protocol === "https:" ? https : http).request(
+      targetUrl,
+      {
+        method: (options.method || "GET").toUpperCase(),
+        headers: { ...options.headers },
+        agent,
+        signal: options.signal,
+      },
+      (res) => {
+        const headers = new Headers();
+        for (const [k, v] of Object.entries(res.headers)) {
+          if (Array.isArray(v)) v.forEach((x) => headers.append(k, String(x)));
+          else if (v != null) headers.set(k, String(v));
+        }
+        resolve(
+          new Response(Readable.toWeb(res), {
+            status: res.statusCode,
+            statusText: res.statusMessage || "",
+            headers,
+          })
+        );
+      }
+    );
+    req.on("error", (err) => {
+      // Connection-level errors → drop the cached agent so the next request rebuilds it
+      if (SOCKS_CONN_ERRORS.has(err?.code)) evictSocksAgent(socksUrl);
+      reject(err);
+    });
+    if (options.body != null && options.body !== "") {
+      req.write(typeof options.body === "string" ? options.body : JSON.stringify(options.body));
+    }
+    req.end();
+  });
 }
 
 /**
@@ -291,9 +416,34 @@ async function createBypassRequest(parsedUrl, realIP, options) {
   });
 }
 
-export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
-  const targetUrl = typeof url === "string" ? url : url.toString();
+/**
+ * Wrap a fetch with pool-level metrics reporting (fail-open: metric
+ * writes never affect the request). Pool id comes from proxyOptions.
+ */
+async function timedProxyFetch(poolId, fetchFn) {
+  const startedAt = Date.now();
+  try {
+    const res = await fetchFn();
+    if (poolId) {
+      const ph = await getProxyHealth();
+      if (ph) ph.reportProxySuccess(poolId, Date.now() - startedAt).catch(() => {});
+    }
+    return res;
+  } catch (err) {
+    if (poolId) {
+      const ph = await getProxyHealth();
+      if (ph) ph.reportProxyFailure(poolId, err?.message || String(err)).catch(() => {});
+    }
+    throw err;
+  }
+}
 
+/**
+ * Build a single fetch plan for the current proxy options.
+ * Returns { kind, poolId, run } where kind ∈ relay | mitm | proxy | bypass | direct.
+ * "bypass" (MITM direct-DNS) and "direct" are terminal — no pool retry.
+ */
+async function buildPlan(targetUrl, url, options, proxyOptions, poolId) {
   // Vercel relay: forward request via relay headers
   const vercelRelayUrl = normalizeString(proxyOptions?.vercelRelayUrl);
   if (vercelRelayUrl) {
@@ -303,7 +453,11 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
       "x-relay-target": `${parsed.protocol}//${parsed.host}`,
       "x-relay-path": `${parsed.pathname}${parsed.search}`,
     };
-    return originalFetch(vercelRelayUrl, { ...options, headers: relayHeaders });
+    return {
+      kind: "relay",
+      poolId,
+      run: () => originalFetch(vercelRelayUrl, { ...options, headers: relayHeaders }),
+    };
   }
 
   const connectionProxyUrl = resolveConnectionProxyUrl(targetUrl, proxyOptions);
@@ -314,43 +468,120 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
   if (shouldBypassMitmDns(targetUrl)) {
     if (proxyUrl) {
       // Proxy resolves DNS externally (not affected by /etc/hosts) — use proxy directly
-      try {
-        const dispatcher = await getDispatcher(proxyUrl);
-        return await originalFetch(url, { ...options, dispatcher });
-      } catch (proxyError) {
-        if (proxyOptions?.strictProxy === true) {
-          throw new Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${proxyError.message}`);
-        }
-        console.warn(`[ProxyFetch] Proxy failed, falling back to direct bypass: ${proxyError.message}`);
-      }
+      return {
+        kind: "mitm",
+        poolId,
+        run: async () => {
+          const dispatcher = await getDispatcher(proxyUrl);
+          if (dispatcher?.socks) return socksFetch(targetUrl, options, dispatcher.socks);
+          return originalFetch(url, { ...options, dispatcher });
+        },
+      };
     }
     // No proxy — manually resolve real IP to bypass DNS spoof
-    try {
-      const parsedUrl = new URL(targetUrl);
-      const realIP = await resolveRealIP(parsedUrl.hostname);
-      if (realIP) return await createBypassRequest(parsedUrl, realIP, options);
-    } catch (error) {
-      console.warn(`[ProxyFetch] MITM bypass failed: ${error.message}`);
-    }
+    return {
+      kind: "bypass",
+      poolId: null,
+      run: async () => {
+        try {
+          const parsedUrl = new URL(targetUrl);
+          const realIP = await resolveRealIP(parsedUrl.hostname);
+          if (realIP) return await createBypassRequest(parsedUrl, realIP, options);
+        } catch (error) {
+          console.warn(`[ProxyFetch] MITM bypass failed: ${error.message}`);
+        }
+        return originalFetch(url, options);
+      },
+    };
   }
 
   if (proxyUrl) {
-    try {
-      const dispatcher = await getDispatcher(proxyUrl);
-      return await originalFetch(url, { ...options, dispatcher });
-    } catch (proxyError) {
-      // If strictProxy is enabled, fail hard instead of falling back to direct
-      if (proxyOptions?.strictProxy === true) {
-        throw new Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${proxyError.message}`);
-      }
-      console.warn(`[ProxyFetch] Proxy failed, falling back to direct: ${proxyError.message}`);
-      return originalFetch(url, options);
-    }
+    return {
+      kind: "proxy",
+      poolId,
+      run: async () => {
+        const dispatcher = await getDispatcher(proxyUrl);
+        if (dispatcher?.socks) return socksFetch(targetUrl, options, dispatcher.socks);
+        return originalFetch(url, { ...options, dispatcher });
+      },
+    };
   }
 
-  // got-scraping disabled — use native fetch directly
-  // (Re-enable per-host by wrapping with tryGotScrapingFetch when needed)
-  return originalFetch(url, options);
+  return { kind: "direct", poolId: null, run: () => originalFetch(url, options) };
+}
+
+/**
+ * Pick the next untried, healthy pool for failover (via proxyHealth).
+ * Returns null when no candidate remains.
+ */
+async function pickFailoverPool(poolIds, tried) {
+  if (!poolIds || poolIds.length === 0) return null;
+  const candidates = poolIds.filter((id) => !tried.has(id));
+  if (candidates.length === 0) return null;
+  const ph = await getProxyHealth();
+  if (!ph || typeof ph.getPoolProxyOptions !== "function") return null;
+  return ph.getPoolProxyOptions(candidates).catch(() => null);
+}
+
+export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
+  const targetUrl = typeof url === "string" ? url : url.toString();
+  const poolIds = Array.isArray(proxyOptions?.connectionProxyPoolIds)
+    ? proxyOptions.connectionProxyPoolIds
+    : [];
+  const isStrict = proxyOptions?.strictProxy === true || proxyOptions?.poolAllowFallbackDirect === false;
+  const maxFailover = Math.max(1, Number(proxyOptions?.poolMaxFailover) || 2);
+  let currentProxyOptions = proxyOptions;
+  let currentPoolId = normalizeString(proxyOptions?.connectionProxyPoolId) || null;
+  const tried = new Set();
+
+  for (;;) {
+    const plan = await buildPlan(targetUrl, url, options, currentProxyOptions, currentPoolId);
+
+    // Terminal plans (no proxy involved) — never retried
+    if (plan.kind === "direct" || plan.kind === "bypass") return plan.run();
+
+    try {
+      // Per-pool concurrency cap (E3) — 0 = unlimited
+      if (plan.poolId) await acquireSlot(plan.poolId, Number(currentProxyOptions?.poolMaxConcurrency) || 0);
+      return await timedProxyFetch(plan.poolId, plan.run);
+    } catch (err) {
+      if (plan.poolId) tried.add(plan.poolId);
+
+      // Failover: try the next healthy pool (if any), capped by maxFailover
+      const next = poolIds.length > 0 && tried.size < maxFailover
+        ? await pickFailoverPool(poolIds, tried)
+        : null;
+      if (next) {
+        currentProxyOptions = {
+          ...proxyOptions,
+          connectionProxyUrl: next.connectionProxyUrl,
+          vercelRelayUrl: next.vercelRelayUrl,
+          connectionProxyPoolId: next.id,
+        };
+        currentPoolId = next.id;
+        continue;
+      }
+
+      // All pools exhausted (or no pools) — fallback
+      if (plan.kind === "mitm") {
+        // Keep old MITM behavior: try direct DNS bypass before giving up
+        try {
+          const parsedUrl = new URL(targetUrl);
+          const realIP = await resolveRealIP(parsedUrl.hostname);
+          if (realIP) return await createBypassRequest(parsedUrl, realIP, options);
+        } catch (error) {
+          console.warn(`[ProxyFetch] MITM bypass failed: ${error.message}`);
+        }
+      }
+      if (isStrict) {
+        throw new Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${err.message}`);
+      }
+      console.warn(`[ProxyFetch] Proxy failed, falling back to direct: ${err.message}`);
+      return originalFetch(url, options);
+    } finally {
+      if (plan.poolId) releaseSlot(plan.poolId);
+    }
+  }
 }
 
 /**

@@ -50,17 +50,27 @@ const COOLDOWN = {
 /**
  * Unified error classification rules.
  * Checked top-to-bottom: text rules first (by order), then status rules.
- * Each rule: { text?, status?, cooldownMs?, backoff? }
+ * Each rule: { text?, status?, cooldownMs?, backoff?, permanent? }
  *   - text: substring match (case-insensitive) on error message
  *   - status: HTTP status code match
  *   - cooldownMs: fixed cooldown duration
  *   - backoff: true = use exponential backoff (rate limit)
+ *   - permanent: true = client/model fault; NO account fallback, NO account lock.
+ *                Falls through as a plain final error (e.g. 400/404/406).
  */
 export const ERROR_RULES = [
   // --- Text-based rules (checked first, order = priority) ---
   { text: "no credentials",           cooldownMs: COOLDOWN.long },
   { text: "request not allowed",      cooldownMs: COOLDOWN.short },
   { text: "improperly formed request", cooldownMs: COOLDOWN.long },
+  { text: "model not found",          permanent: true },
+  { text: "model_not_found",          permanent: true },
+  { text: "invalid model",            permanent: true },
+  { text: "unknown model",            permanent: true },
+  { text: "no such model",            permanent: true },
+  { text: "was not found",            permanent: true },
+  { text: "does not exist",           permanent: true },
+  { text: "doesn't exist",            permanent: true },
   { text: "rate limit",               backoff: true },
   { text: "too many requests",        backoff: true },
   { text: "quota exceeded",           backoff: true },
@@ -68,10 +78,12 @@ export const ERROR_RULES = [
   { text: "overloaded",               backoff: true },
 
   // --- Status-based rules (fallback when text doesn't match) ---
+  { status: 400, permanent: true },
   { status: 401, cooldownMs: COOLDOWN.long },
   { status: 402, cooldownMs: COOLDOWN.long },
   { status: 403, cooldownMs: COOLDOWN.long },
-  { status: 404, cooldownMs: COOLDOWN.long },
+  { status: 404, permanent: true },
+  { status: 406, permanent: true },
   { status: 429, backoff: true },
 ];
 

@@ -5,6 +5,38 @@ const { pathToFileURL } = require("url");
 const origCreate = http.createServer.bind(http);
 
 let backgroundRefreshStarted = false;
+let proxyHealthStarted = false;
+
+function startProxyHealthFromCustomServer() {
+  if (proxyHealthStarted) return;
+  proxyHealthStarted = true;
+  // Prefer source path (repo / standalone that still has src). Fail-open if missing
+  // — the app bootstrap (initializeApp) also starts the same monitor when Next boots.
+  const modPath = path.join(__dirname, "src", "lib", "network", "proxyHealth.js");
+  import(pathToFileURL(modPath).href)
+    .then((m) => {
+      try {
+        m.startProxyHealthMonitor();
+      } catch (e) {
+        console.error("[ProxyHealth] start failed:", e && e.message ? e.message : e);
+      }
+      const stop = () => {
+        try {
+          m.stopProxyHealthMonitor();
+        } catch {
+          /* ignore */
+        }
+      };
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+    })
+    .catch((e) => {
+      // Expected in published CLI standalone (src/ not on disk). App bootstrap covers it.
+      if (process.env.DEBUG_PROXY_HEALTH) {
+        console.error("[ProxyHealth] import failed:", e && e.message ? e.message : e);
+      }
+    });
+}
 
 function startBackgroundTokenRefreshFromCustomServer() {
   if (backgroundRefreshStarted) return;
@@ -64,6 +96,7 @@ http.createServer = (...args) => {
   const server = origCreate(...rest, wrapped);
   server.once("listening", () => {
     startBackgroundTokenRefreshFromCustomServer();
+    startProxyHealthFromCustomServer();
   });
   const origEmit = server.emit;
   // JBR 25 sends h2c upgrades that the HTTP/1.1 server would otherwise close.

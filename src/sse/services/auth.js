@@ -3,6 +3,8 @@ import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/con
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
+import { makeKv } from "@/lib/db/helpers/kvStore.js";
+import { sendNotification } from "@/lib/notifications";
 import * as log from "../utils/logger.js";
 
 // Mutex to prevent race conditions during account selection
@@ -47,10 +49,17 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       const override = (settings.providerStrategies || {})[providerId] || {};
       const strategy = override.rotateStrategy || "none";
       let pickedId = override.proxyPoolId || null;
+      let poolIdsForFailover = [];
       if (strategy !== "none") {
         const allPools = await getProxyPools({ isActive: true });
         const poolIds = allPools.filter(p => p.proxyUrl).map(p => p.id);
-        pickedId = pickProxyPoolId(poolIds, strategy, providerId);
+        pickedId = await pickProxyPoolId(poolIds, strategy, providerId);
+        poolIdsForFailover = poolIds;
+      }
+      // F2: per-model override for NoAuth providers (providerStrategies[providerId].modelPoolOverrides)
+      const modelOverrideId = model ? normalizeString(override.modelPoolOverrides?.[model]) || null : null;
+      if (modelOverrideId && poolIdsForFailover.includes(modelOverrideId)) {
+        pickedId = modelOverrideId;
       }
       const resolvedProxy = await resolveConnectionProxyConfig({ proxyPoolId: pickedId || "" });
       return {
@@ -63,6 +72,10 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
           connectionProxyUrl: resolvedProxy.connectionProxyUrl,
           connectionNoProxy: resolvedProxy.connectionNoProxy,
           connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
+          connectionProxyPoolIds: poolIdsForFailover,
+          poolMaxFailover: resolvedProxy.maxFailover ?? 2,
+          poolAllowFallbackDirect: resolvedProxy.allowFallbackDirect !== false,
+          poolMaxConcurrency: resolvedProxy.maxConcurrency ?? 0,
           vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
         },
       };
@@ -101,6 +114,10 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       if (earliest) {
         const earliestConn = lockedConns[0];
         log.warn("AUTH", `${provider} | all ${connections.length} accounts locked for ${model || "all"} (${formatRetryAfter(earliest)}) | lastError=${earliestConn?.lastError?.slice(0, 50)}`);
+        sendNotification("account_locked", {
+          provider: providerId, model: model || "all",
+          connectionId: earliestConn?.id, message: earliestConn?.lastError?.slice(0, 200),
+        }).catch(() => {});
         return {
           allRateLimited: true,
           retryAfter: earliest,
@@ -168,11 +185,19 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         });
       }
     } else {
-      // Default: fill-first (already sorted by priority in getProviderConnections)
-      connection = availableConnections[0];
+      // Default: fill-first — adaptive tiebreak: same priority → prefer the
+      // account with the best learning score (≥5 samples), then most recent success.
+      connection = await pickByAdaptiveScore(availableConnections);
     }
 
-    const resolvedProxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
+    // Per-model pool override (providerSpecificData.modelProxyPools = { modelName: poolId })
+    const modelProxyPools = connection.providerSpecificData?.modelProxyPools || {};
+    const modelPoolId = model ? normalizeString(modelProxyPools[model]) || null : null;
+
+    const resolvedProxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {}, {
+      poolIdOverride: modelPoolId || undefined,
+    });
+    const boundPoolId = resolvedProxy.proxyPoolId || null;
 
     return {
       authType: connection.authType,
@@ -191,7 +216,11 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         connectionProxyEnabled: resolvedProxy.connectionProxyEnabled,
         connectionProxyUrl: resolvedProxy.connectionProxyUrl,
         connectionNoProxy: resolvedProxy.connectionNoProxy,
-        connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
+        connectionProxyPoolId: boundPoolId,
+        connectionProxyPoolIds: boundPoolId ? [boundPoolId] : [],
+        poolMaxFailover: resolvedProxy.maxFailover ?? 2,
+        poolAllowFallbackDirect: resolvedProxy.allowFallbackDirect !== false,
+        poolMaxConcurrency: resolvedProxy.maxConcurrency ?? 0,
         vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
       },
       connectionId: connection.id,
@@ -259,6 +288,14 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   if (provider && status && reason) {
     console.error(`❌ ${provider} [${status}]: ${reason}`);
   }
+
+  // Learning score: only non-permanent failures count against the account
+  await recordAccountFail(connectionId);
+
+  sendNotification("account_locked", {
+    provider, model: lockKey.startsWith("modelLock___all") ? null : model,
+    connectionId, message: reason, status, cooldownSec: Math.round(cooldownMs / 1000),
+  }).catch(() => {});
 
   return { shouldFallback: true, cooldownMs };
 }
@@ -338,4 +375,58 @@ export function extractApiKey(request) {
 export async function isValidApiKey(apiKey) {
   if (!apiKey) return false;
   return await validateApiKey(apiKey);
+}
+
+// ─── Adaptive account scoring (B1) ───────────────────────────────────────
+// Tracks success/fail per connection in kv. Score = success rate once ≥5
+// samples, else neutral 0.5 (avoids early over-confidence).
+const scoreKv = makeKv("accountScore");
+const MIN_SCORE_SAMPLES = 5;
+
+export async function recordAccountSuccess(connectionId) {
+  if (!connectionId || connectionId === "noauth") return;
+  const cur = (await scoreKv.get(connectionId, null)) || {};
+  await scoreKv.set(connectionId, {
+    success: (cur.success || 0) + 1,
+    fail: cur.fail || 0,
+    lastSuccessAt: Date.now(),
+    lastFailAt: cur.lastFailAt || 0,
+  });
+}
+
+export async function recordAccountFail(connectionId) {
+  if (!connectionId || connectionId === "noauth") return;
+  const cur = (await scoreKv.get(connectionId, null)) || {};
+  await scoreKv.set(connectionId, {
+    success: cur.success || 0,
+    fail: (cur.fail || 0) + 1,
+    lastSuccessAt: cur.lastSuccessAt || 0,
+    lastFailAt: Date.now(),
+  });
+}
+
+export async function getAccountScore(connectionId) {
+  if (!connectionId) return { score: 0.5, samples: 0, rate: 0.5, lastSuccessAt: 0 };
+  const cur = (await scoreKv.get(connectionId, null)) || {};
+  const samples = (cur.success || 0) + (cur.fail || 0);
+  const rate = samples > 0 ? (cur.success || 0) / samples : 0.5;
+  return {
+    score: samples >= MIN_SCORE_SAMPLES ? rate : 0.5,
+    samples,
+    rate,
+    lastSuccessAt: cur.lastSuccessAt || 0,
+  };
+}
+
+async function pickByAdaptiveScore(connections) {
+  const scored = await Promise.all(connections.map(async (c) => ({
+    c,
+    score: await getAccountScore(c.id),
+  })));
+  scored.sort((a, b) =>
+    b.score.score - a.score.score ||
+    (a.c.priority ?? 999) - (b.c.priority ?? 999) ||
+    (b.score.lastSuccessAt || 0) - (a.score.lastSuccessAt || 0)
+  );
+  return scored[0]?.c || connections[0];
 }

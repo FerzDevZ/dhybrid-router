@@ -6,8 +6,11 @@ import {
   clearAccountError,
   extractApiKey,
   isValidApiKey,
+  recordAccountSuccess,
 } from "../services/auth.js";
 import { getSettings } from "@/lib/localDb";
+import { checkKeyRateLimit, checkDailyQuota } from "@/lib/rateLimit";
+import { sendNotification } from "@/lib/notifications";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
 import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
@@ -23,12 +26,32 @@ import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 
+function rateLimitResponse(retryAfterSec, message) {
+  return new Response(JSON.stringify({ error: { message, type: "rate_limit_error", code: "rate_limit_exceeded" } }), {
+    status: HTTP_STATUS.RATE_LIMITED,
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+      "Retry-After": String(retryAfterSec),
+    },
+  });
+}
+
 /**
  * Handle chat completion request
  * Supports: OpenAI, Claude, Gemini, OpenAI Responses API formats
  * Format detection and translation handled by translator
  */
 export async function handleChat(request, clientRawRequest = null) {
+  // Tracing: expose a per-request id on every response (success or error)
+  const requestId = `req_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  const res = await handleChatInner(request, clientRawRequest, requestId);
+  const headers = new Headers(res.headers);
+  if (!headers.has("x-9r-request-id")) headers.set("x-9r-request-id", requestId);
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+}
+
+async function handleChatInner(request, clientRawRequest = null, requestId = null) {
   let body;
   try {
     body = await request.json();
@@ -45,6 +68,9 @@ export async function handleChat(request, clientRawRequest = null) {
       body,
       headers: Object.fromEntries(request.headers.entries())
     };
+  }
+  if (requestId && clientRawRequest?.headers && !clientRawRequest.headers["x-9r-request-id"]) {
+    clientRawRequest.headers["x-9r-request-id"] = requestId;
   }
   const modelStr = body.model;
 
@@ -71,6 +97,22 @@ export async function handleChat(request, clientRawRequest = null) {
     if (!valid) {
       log.warn("AUTH", "Invalid API key (requireApiKey=true)");
       return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key");
+    }
+  }
+
+  // Per-key throttle — rate limit (RPM window) + daily quota; only when a key is presented
+  if (apiKey) {
+    const rl = checkKeyRateLimit(apiKey, settings.apiKeyRateLimit || {});
+    if (!rl.allowed) {
+      log.warn("AUTH", `API key rate limited (${settings.apiKeyRateLimit?.rpm || 60}/min)`);
+      sendNotification("api_key_limited", { apiKey: log.maskKey(apiKey), reason: "rate_limit", retryAfterSec: rl.retryAfterSec }).catch(() => {});
+      return rateLimitResponse(rl.retryAfterSec, "Rate limit exceeded for this API key");
+    }
+    const quota = await checkDailyQuota(apiKey, settings.apiKeyDailyQuota || {});
+    if (!quota.allowed) {
+      log.warn("AUTH", `API key daily quota reached (${quota.used}/${quota.limit})`);
+      sendNotification("api_key_limited", { apiKey: log.maskKey(apiKey), reason: "daily_quota", used: quota.used, limit: quota.limit }).catch(() => {});
+      return rateLimitResponse(86400, "Daily quota exceeded for this API key");
     }
   }
 
@@ -233,6 +275,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         const errorMsg = lastError || credentials.lastError || "Unavailable";
         const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
         log.warn("CHAT", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
+        sendNotification("provider_all_locked", { provider, model, message: errorMsg, retryAfterHuman: credentials.retryAfterHuman }).catch(() => {});
         return unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman);
       }
       if (excludeConnectionIds.size === 0) {
@@ -240,6 +283,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         return errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
       }
       log.warn("CHAT", "No more accounts available", { provider });
+      sendNotification("all_accounts_failed", { provider, model, message: lastError || "", status: lastStatus }).catch(() => {});
       return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
     }
 
@@ -295,6 +339,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       },
       onRequestSuccess: async () => {
         await clearAccountError(credentials.connectionId, credentials, model);
+        await recordAccountSuccess(credentials.connectionId);
       }
     });
 

@@ -1,4 +1,5 @@
 import { getProxyPoolById } from "@/models";
+import { makeKv } from "../db/helpers/kvStore.js";
 
 // Safely normalize any value into a trimmed string.
 function normalizeString(value) {
@@ -6,31 +7,99 @@ function normalizeString(value) {
   return String(value).trim();
 }
 
-// ─── Proxy pool rotation state (in-memory) ─────────────────────────
+// ─── Proxy pool rotation state ──────────────────────────────────────
+// In-memory cursor for fast path + persistent kv cursor so rotation
+// survives restarts. kv writes are throttled per provider (at most one
+// write per 5s; intermediate steps live in memory).
 const rotateState = new Map(); // providerId → { index }
+const rotationKv = makeKv("proxyRotation");
+const KV_WRITE_THROTTLE_MS = 5000;
+const lastKvWriteAtByProvider = new Map(); // providerId → timestamp
+
+async function loadRotationState(providerId) {
+  let state = rotateState.get(providerId);
+  if (state) return state;
+  try {
+    const saved = await rotationKv.get(providerId, { index: -1 });
+    state = { index: Number.isFinite(saved?.index) ? saved.index : -1 };
+  } catch {
+    state = { index: -1 }; // fail-open: start fresh if kv unavailable
+  }
+  rotateState.set(providerId, state);
+  return state;
+}
+
+async function saveRotationState(providerId, state) {
+  const now = Date.now();
+  const last = lastKvWriteAtByProvider.get(providerId) || 0;
+  if (now - last < KV_WRITE_THROTTLE_MS) return;
+  lastKvWriteAtByProvider.set(providerId, now);
+  rotationKv.set(providerId, { index: state.index }).catch(() => {
+    /* fail-open */
+  });
+}
 
 /**
  * Pick one proxy pool ID from a list based on strategy.
- * round-robin: cycle sequentially (in-memory, resets on restart)
+ * Pools inside circuit-breaker cooldown are skipped (health-aware rotation);
+ * if every pool is cooling down, fall back to the full list so traffic
+ * is never hard-blocked by health state alone.
+ *
+ * round-robin: cycle sequentially (persistent cursor in kv, throttled writes)
  * random:      uniform random pick
- * none/single: return first entry
+ * none/single: return first healthy entry
  */
-export function pickProxyPoolId(poolIds, strategy, providerId) {
+export async function pickProxyPoolId(poolIds, strategy, providerId) {
   if (!poolIds || poolIds.length === 0) return null;
   if (poolIds.length === 1) return poolIds[0];
 
+  // Load cooldown state (relative import — safe under Next bundle and native ESM)
+  let cooldownById = new Map();
+  let poolsById = new Map();
+  try {
+    const { getProxyPools } = await import("../../lib/db/repos/proxyPoolsRepo.js");
+    const pools = await getProxyPools({ isActive: true });
+    const now = Date.now();
+    poolsById = new Map(pools.map((p) => [p.id, p]));
+    cooldownById = new Map(
+      pools
+        .filter((p) => p.cooldownUntil && new Date(p.cooldownUntil).getTime() > now)
+        .map((p) => [p.id, true])
+    );
+  } catch {
+    /* fail-open: ignore cooldown state if it can't be loaded */
+  }
+
+  const healthyIds = poolIds.filter((id) => !cooldownById.has(id));
+  const candidates = healthyIds.length > 0 ? healthyIds : poolIds;
+
   if (strategy === "round-robin") {
-    const state = rotateState.get(providerId) || { index: -1 };
-    state.index = (state.index + 1) % poolIds.length;
-    rotateState.set(providerId, state);
-    return poolIds[state.index];
+    const state = await loadRotationState(providerId);
+    state.index = (state.index + 1) % candidates.length;
+    await saveRotationState(providerId, state);
+    return candidates[state.index];
+  }
+
+  if (strategy === "weighted") {
+    // Health-based weighted pick: best pools get higher probability,
+    // others still get a chance (bias via squared random).
+    let scored = candidates.map((id) => ({ id, score: 50 }));
+    try {
+      const { computePoolScore } = await import("./proxyHealth.js");
+      scored = candidates
+        .map((id) => ({ id, score: computePoolScore(poolsById.get(id) || {}) }))
+        .sort((a, b) => b.score - a.score);
+    } catch {
+      /* fail-open: uniform pick below */
+    }
+    return scored[Math.floor(Math.random() ** 2 * scored.length)].id;
   }
 
   if (strategy === "random") {
-    return poolIds[Math.floor(Math.random() * poolIds.length)];
+    return candidates[Math.floor(Math.random() * candidates.length)];
   }
 
-  return poolIds[0]; // "none" or unknown
+  return candidates[0]; // "none" or unknown
 }
 
 /**
@@ -59,21 +128,22 @@ function normalizeLegacyProxy(providerSpecificData = {}) {
  * Resolve final proxy configuration.
  *
  * Priority:
- * 1. Proxy Pool
+ * 1. Proxy Pool (or per-model override when `options.poolIdOverride` is set)
  * 2. Legacy Proxy
  * 3. No Proxy
  */
 export async function resolveConnectionProxyConfig(
-  providerSpecificData = {}
+  providerSpecificData = {},
+  options = {}
 ) {
   try {
-    const proxyPoolIdRaw = normalizeString(
-      providerSpecificData?.proxyPoolId
-    );
-
+    const raw = normalizeString(providerSpecificData?.proxyPoolId);
     // "__none__" means explicitly disabled
+    const overrideRaw = normalizeString(options?.poolIdOverride);
     const proxyPoolId =
-      proxyPoolIdRaw === "__none__" ? "" : proxyPoolIdRaw;
+      overrideRaw === "__none__"
+        ? ""
+        : overrideRaw || (raw === "__none__" ? "" : raw);
 
     const legacy = normalizeLegacyProxy(providerSpecificData);
 
@@ -110,6 +180,9 @@ export async function resolveConnectionProxyConfig(
             connectionNoProxy: noProxy,
 
             strictProxy: proxyPool.strictProxy === true,
+            maxFailover: proxyPool.maxFailover ?? 2,
+            allowFallbackDirect: proxyPool.allowFallbackDirect !== false,
+            maxConcurrency: proxyPool.maxConcurrency ?? 0,
 
             vercelRelayUrl: proxyUrl, // Still mapped to vercelRelayUrl in the unified payload since they use the exact same header spec
           };
@@ -129,6 +202,9 @@ export async function resolveConnectionProxyConfig(
           connectionNoProxy: noProxy,
 
           strictProxy: proxyPool.strictProxy === true,
+          maxFailover: proxyPool.maxFailover ?? 2,
+          allowFallbackDirect: proxyPool.allowFallbackDirect !== false,
+          maxConcurrency: proxyPool.maxConcurrency ?? 0,
         };
       }
     }

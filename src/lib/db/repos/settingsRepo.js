@@ -25,6 +25,8 @@ const DEFAULT_SETTINGS = {
   },
   requireLogin: true,
   requireApiKey: true,
+  apiKeyRateLimit: { enabled: false, rpm: 60 },
+  apiKeyDailyQuota: { enabled: false, requests: 500 },
   tunnelDashboardAccess: true,
   authMode: "password",
   oidcIssuerUrl: "",

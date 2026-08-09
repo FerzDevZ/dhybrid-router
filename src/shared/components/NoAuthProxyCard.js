@@ -11,12 +11,14 @@ const STRATEGIES = [
   { value: "none", label: "None (single pool)" },
   { value: "round-robin", label: "Round-robin" },
   { value: "random", label: "Random" },
+  { value: "weighted", label: "Weighted (health)" },
 ];
 
 export default function NoAuthProxyCard({ providerId }) {
   const [proxyPools, setProxyPools] = useState([]);
   const [proxyPoolId, setProxyPoolId] = useState(NONE_PROXY_POOL_VALUE);
   const [rotateStrategy, setRotateStrategy] = useState("none");
+  const [modelOverridesText, setModelOverridesText] = useState("");
   const [saving, setSaving] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
 
@@ -31,11 +33,28 @@ export default function NoAuthProxyCard({ providerId }) {
       const override = (settingsData.providerStrategies || {})[providerId] || {};
       setProxyPoolId(override.proxyPoolId || NONE_PROXY_POOL_VALUE);
       setRotateStrategy(override.rotateStrategy || "none");
+      setModelOverridesText(
+        Object.entries(override.modelPoolOverrides || {})
+          .map(([m, p]) => `${m}:${p}`)
+          .join("\n")
+      );
     }).catch(() => {});
     return () => { cancelled = true; };
   }, [providerId]);
 
-  const save = useCallback(async (poolId, strategy) => {
+  const parseModelOverrides = (text) => {
+    const out = {};
+    text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).forEach((line) => {
+      const idx = line.indexOf(":");
+      if (idx <= 0) return;
+      const model = line.slice(0, idx).trim();
+      const pool = line.slice(idx + 1).trim();
+      if (model && pool) out[model] = pool;
+    });
+    return out;
+  };
+
+  const save = useCallback(async (poolId, strategy, overridesText = modelOverridesText) => {
     setSaving(true);
     try {
       const res = await fetch("/api/settings", { cache: "no-store" });
@@ -46,6 +65,9 @@ export default function NoAuthProxyCard({ providerId }) {
       else override.proxyPoolId = poolId;
       if (strategy === "none") delete override.rotateStrategy;
       else override.rotateStrategy = strategy;
+      const parsed = parseModelOverrides(overridesText);
+      if (Object.keys(parsed).length === 0) delete override.modelPoolOverrides;
+      else override.modelPoolOverrides = parsed;
       const updated = { ...current };
       if (Object.keys(override).length === 0) delete updated[providerId];
       else updated[providerId] = override;
@@ -61,7 +83,7 @@ export default function NoAuthProxyCard({ providerId }) {
     } finally {
       setSaving(false);
     }
-  }, [providerId]);
+  }, [providerId, modelOverridesText]);
 
   const handlePoolChange = (newPoolId) => {
     setProxyPoolId(newPoolId);
@@ -121,8 +143,25 @@ export default function NoAuthProxyCard({ providerId }) {
             : isRotation
               ? rotateStrategy === "round-robin"
                 ? `Rotating through all ${proxyPools.length} active pools in order. State is in-memory (resets on restart).`
-                : `Picking a random pool from ${proxyPools.length} active pools each request.`
+                : rotateStrategy === "weighted"
+                  ? `Picking a pool weighted by health score (success rate + latency) from ${proxyPools.length} active pools.`
+                  : `Picking a random pool from ${proxyPools.length} active pools each request.`
               : `Uses the selected pool above. Set to Round-robin or Random to rotate across all active pools.`}
+        </p>
+      </div>
+
+      <div className="mt-4">
+        <label className="text-sm font-medium text-text-main block mb-1">Model → Pool overrides</label>
+        <textarea
+          value={modelOverridesText}
+          onChange={(e) => setModelOverridesText(e.target.value)}
+          onBlur={() => save(proxyPoolId, rotateStrategy)}
+          placeholder={"gpt-4o:pool-id-1\nclaude-3-5-sonnet:pool-id-2"}
+          disabled={saving}
+          className="w-full min-h-[70px] px-3 py-2 text-sm text-text-main bg-white dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-md focus:ring-1 focus:ring-primary/30 focus:border-primary/50 focus:outline-none transition-all disabled:opacity-50"
+        />
+        <p className="text-xs text-text-muted mt-1">
+          Format: <code>modelName:poolId</code> per line (pool id from the Proxy Pools page). Applies only to requests with that exact model. Saves on blur.
         </p>
       </div>
     </Card>

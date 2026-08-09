@@ -197,9 +197,22 @@ ConnectionRow.propTypes = {
 function AddApiKeyModal({ isOpen, provider, providerName, proxyPools, onSave, onClose }) {
   const NONE = "__none__";
   const [formData, setFormData] = useState({ name: "", apiKey: "", priority: 1, proxyPoolId: NONE });
+  const [modelOverridesText, setModelOverridesText] = useState("");
   const [validating, setValidating] = useState(false);
   const [validationResult, setValidationResult] = useState(null);
   const [saving, setSaving] = useState(false);
+
+  const parseModelOverrides = (text) => {
+    const out = {};
+    text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).forEach((line) => {
+      const idx = line.indexOf(":");
+      if (idx <= 0) return;
+      const model = line.slice(0, idx).trim();
+      const pool = line.slice(idx + 1).trim();
+      if (model && pool) out[model] = pool;
+    });
+    return out;
+  };
 
   const handleValidate = async () => {
     setValidating(true);
@@ -238,6 +251,9 @@ function AddApiKeyModal({ isOpen, provider, providerName, proxyPools, onSave, on
         priority: formData.priority,
         proxyPoolId: formData.proxyPoolId === NONE ? null : formData.proxyPoolId,
         testStatus: isValid ? "active" : "unknown",
+        ...(modelOverridesText.trim()
+          ? { providerSpecificData: { modelProxyPools: parseModelOverrides(modelOverridesText) } }
+          : {}),
       });
     } finally { setSaving(false); }
   };
@@ -273,6 +289,18 @@ function AddApiKeyModal({ isOpen, provider, providerName, proxyPools, onSave, on
         </div>
         <Select label="Proxy Pool" value={formData.proxyPoolId} onChange={(e) => setFormData({ ...formData, proxyPoolId: e.target.value })}
           options={[{ value: NONE, label: "None" }, ...(proxyPools || []).map((p) => ({ value: p.id, label: p.name }))]} />
+        <div>
+          <label className="text-xs text-text-muted mb-1 block">Model → Pool overrides (one per line)</label>
+          <textarea
+            value={modelOverridesText}
+            onChange={(e) => setModelOverridesText(e.target.value)}
+            placeholder={"gpt-4o:Pool A\nclaude-3-5-sonnet:Pool B"}
+            className="w-full min-h-[90px] px-3 py-2 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
+          />
+          <p className="text-xs text-text-muted mt-1">
+            Format: <code>modelName:poolId</code> per line (pool id from the Proxy Pools page). Model-matched requests use that pool instead of the default selection.
+          </p>
+        </div>
         <div className="flex gap-2">
           <Button onClick={handleSubmit} fullWidth disabled={!formData.name || !formData.apiKey || saving}>
             {saving ? "Saving..." : "Save"}

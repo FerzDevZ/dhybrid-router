@@ -296,6 +296,11 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     connectionProxyUrl: credentials?.providerSpecificData?.connectionProxyUrl || "",
     connectionNoProxy: credentials?.providerSpecificData?.connectionNoProxy || "",
     vercelRelayUrl: credentials?.providerSpecificData?.vercelRelayUrl || "",
+    connectionProxyPoolId: credentials?.providerSpecificData?.connectionProxyPoolId || "",
+    connectionProxyPoolIds: credentials?.providerSpecificData?.connectionProxyPoolIds || [],
+    poolMaxFailover: credentials?.providerSpecificData?.poolMaxFailover ?? 2,
+    poolAllowFallbackDirect: credentials?.providerSpecificData?.poolAllowFallbackDirect !== false,
+    poolMaxConcurrency: credentials?.providerSpecificData?.poolMaxConcurrency ?? 0,
   };
 
   if (proxyOptions.vercelRelayUrl) {
@@ -350,6 +355,17 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       pxpipe: pxpipeSummary,
       status: "error"
     })).catch(() => { });
+    saveRequestUsage({
+      provider: provider || "unknown",
+      model: model || "unknown",
+      tokens: { prompt_tokens: 0, completion_tokens: 0 },
+      timestamp: new Date().toISOString(),
+      connectionId: connectionId || undefined,
+      apiKey: apiKey || undefined,
+      endpoint: clientRawRequest?.endpoint || null,
+      status: `error_${error.name === "AbortError" ? 499 : 502}`,
+      latencyMs: Date.now() - requestStartTime,
+    }).catch(() => { });
 
     if (error.name === "AbortError") {
       streamController.handleError(error);
@@ -414,6 +430,17 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       pxpipe: pxpipeSummary,
       status: "error"
     })).catch(() => { });
+    saveRequestUsage({
+      provider: provider || "unknown",
+      model: model || "unknown",
+      tokens: { prompt_tokens: 0, completion_tokens: 0 },
+      timestamp: new Date().toISOString(),
+      connectionId: connectionId || undefined,
+      apiKey: apiKey || undefined,
+      endpoint: clientRawRequest?.endpoint || null,
+      status: `error_${statusCode}`,
+      latencyMs: Date.now() - requestStartTime,
+    }).catch(() => { });
 
     const errMsg = formatProviderError(new Error(message), provider, model, statusCode);
     if (log?.errorLine) {

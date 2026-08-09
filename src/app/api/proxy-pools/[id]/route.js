@@ -37,6 +37,34 @@ function normalizeProxyPoolUpdate(body = {}) {
     updates.strictProxy = body?.strictProxy === true;
   }
 
+  if (Object.prototype.hasOwnProperty.call(body, "maxFailover")) {
+    updates.maxFailover = Number.isInteger(body?.maxFailover) && body.maxFailover >= 1 ? body.maxFailover : 2;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "allowFallbackDirect")) {
+    updates.allowFallbackDirect = body?.allowFallbackDirect === true;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "tags")) {
+    updates.tags = typeof body?.tags === "string" ? body.tags.trim() : "";
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "autoUnbind")) {
+    updates.autoUnbind = body?.autoUnbind === true;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "priority")) {
+    updates.priority = Number.isInteger(body?.priority) && body.priority >= 1 ? body.priority : 50;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "maxConcurrency")) {
+    updates.maxConcurrency = Number.isInteger(body?.maxConcurrency) && body.maxConcurrency >= 1 ? body.maxConcurrency : 0;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "weight")) {
+    updates.weight = Number.isInteger(body?.weight) && body.weight >= 1 && body.weight <= 100 ? body.weight : 0;
+  }
+
   if (Object.prototype.hasOwnProperty.call(body, "type")) {
     const validTypes = ["http", "vercel", "cloudflare"];
     updates.type = validTypes.includes(body?.type) ? body.type : "http";

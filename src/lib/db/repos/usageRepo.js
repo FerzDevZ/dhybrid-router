@@ -279,11 +279,12 @@ export async function saveRequestUsage(entry) {
       }
 
       db.run(
-        `INSERT INTO usageHistory(timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokens, meta) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO usageHistory(timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, latencyMs, tokens, meta) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           entry.timestamp, entry.provider || null, entry.model || null,
           entry.connectionId || null, entry.apiKey || null, entry.endpoint || null,
           promptTokens, completionTokens, entry.cost || 0, entry.status || "ok",
+          entry.latencyMs || 0,
           stringifyJson(tokens), stringifyJson({}),
         ]
       );
@@ -653,6 +654,28 @@ export async function getUsageStats(period = "all") {
       if (new Date(r.timestamp) > new Date(epe.lastUsed)) epe.lastUsed = r.timestamp;
     }
   }
+
+  // C1: latency percentiles + error rate over the same period (from raw history)
+  let cutoffIso = null;
+  if (period === "today") {
+    const sod = new Date();
+    sod.setHours(0, 0, 0, 0);
+    cutoffIso = sod.toISOString();
+  } else if (PERIOD_MS[period]) {
+    cutoffIso = new Date(Date.now() - PERIOD_MS[period]).toISOString();
+  }
+  const histAll = cutoffIso
+    ? db.all(`SELECT status, latencyMs FROM usageHistory WHERE timestamp >= ?`, [cutoffIso])
+    : db.all(`SELECT status, latencyMs FROM usageHistory`);
+  const latencies = histAll
+    .map((r) => Number(r.latencyMs) || 0)
+    .filter((n) => n > 0)
+    .sort((a, b) => a - b);
+  const pct = (p) => (latencies.length ? latencies[Math.min(latencies.length - 1, Math.max(0, Math.ceil(p * latencies.length) - 1))] : 0);
+  const errorCount = histAll.filter((r) => String(r.status || "").startsWith("error_")).length;
+  stats.latency = { samples: latencies.length, p50: pct(0.5), p90: pct(0.9), p95: pct(0.95), p99: pct(0.99) };
+  stats.errorCount = errorCount;
+  stats.errorRate = histAll.length ? errorCount / histAll.length : 0;
 
   stats.totalRequests = Object.values(stats.byProvider).reduce((sum, p) => sum + (p.requests || 0), 0);
   return stats;

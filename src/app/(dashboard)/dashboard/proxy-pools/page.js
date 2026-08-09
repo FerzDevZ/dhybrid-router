@@ -17,6 +17,48 @@ function formatDateTime(value) {
   return date.toLocaleString();
 }
 
+function formatNumber(value) {
+  const n = Number(value) || 0;
+  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
+}
+
+function formatMs(value) {
+  if (value == null || !Number.isFinite(Number(value))) return "—";
+  return `${Math.round(value)}ms`;
+}
+
+function getSuccessRate(pool) {
+  const total = (pool.successCount || 0) + (pool.failCount || 0);
+  if (total === 0) return null;
+  return Math.round(((pool.successCount || 0) / total) * 100);
+}
+
+function isInCooldown(pool) {
+  if (!pool?.cooldownUntil) return false;
+  const t = new Date(pool.cooldownUntil).getTime();
+  return Number.isFinite(t) && t > Date.now();
+}
+
+// F1: tiny latency sparkline (SVG), last 32 points
+function Sparkline({ points }) {
+  if (!Array.isArray(points) || points.length < 2) return null;
+  const pts = points.slice(-32);
+  const max = Math.max(...pts, 1);
+  const w = 100;
+  const h = 16;
+  const step = w / (pts.length - 1);
+  const poly = pts
+    .map((v, i) => `${(i * step).toFixed(1)},${(h - (Math.min(v, max) / max) * (h - 2) - 1).toFixed(1)}`)
+    .join(" ");
+  return (
+    <svg width={w} height={h} className="inline-block align-middle" title="Last 100 requests latency">
+      <polyline points={poly} fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" opacity={0.7} />
+    </svg>
+  );
+}
+
 function normalizeFormData(data = {}) {
   return {
     name: data.name || "",
@@ -24,6 +66,13 @@ function normalizeFormData(data = {}) {
     noProxy: data.noProxy || "",
     isActive: data.isActive !== false,
     strictProxy: data.strictProxy === true,
+    maxFailover: data.maxFailover ?? 2,
+    allowFallbackDirect: data.allowFallbackDirect !== false,
+    priority: data.priority ?? 50,
+    maxConcurrency: data.maxConcurrency ?? 0,
+    weight: data.weight ?? 0,
+    tags: data.tags || "",
+    autoUnbind: data.autoUnbind !== false,
   };
 }
 
@@ -32,6 +81,10 @@ export default function ProxyPoolsPage() {
   const [loading, setLoading] = useState(true);
   const [showFormModal, setShowFormModal] = useState(false);
   const [showBatchImportModal, setShowBatchImportModal] = useState(false);
+  const [showJsonImportModal, setShowJsonImportModal] = useState(false);
+  const [jsonImportText, setJsonImportText] = useState("");
+  const [jsonImporting, setJsonImporting] = useState(false);
+  const [tagFilter, setTagFilter] = useState(null);
   const [showVercelModal, setShowVercelModal] = useState(false);
   const [showCloudflareModal, setShowCloudflareModal] = useState(false);
   const [showDenoModal, setShowDenoModal] = useState(false);
@@ -80,6 +133,28 @@ export default function ProxyPoolsPage() {
     }
   }, []);
 
+  // Notify once per pool when it newly enters cooldown (D3)
+  const notifiedCooldownRef = useRef(new Set());
+  useEffect(() => {
+    const notified = notifiedCooldownRef.current;
+    proxyPools.forEach((pool) => {
+      if (isInCooldown(pool)) {
+        if (!notified.has(pool.id)) {
+          notified.add(pool.id);
+          notify.warning(`Proxy pool "${pool.name}" entered cooldown (${pool.consecutiveFailures || 0} fails)`);
+        }
+      } else {
+        notified.delete(pool.id); // re-arm when it recovers
+      }
+    });
+  }, [proxyPools, notify]);
+
+  // Auto-refresh every 60s (D3)
+  useEffect(() => {
+    const timer = setInterval(fetchProxyPools, 60_000);
+    return () => clearInterval(timer);
+  }, [fetchProxyPools]);
+
   useEffect(() => {
     fetchProxyPools();
   }, [fetchProxyPools]);
@@ -112,6 +187,13 @@ export default function ProxyPoolsPage() {
       noProxy: formData.noProxy.trim(),
       isActive: formData.isActive === true,
       strictProxy: formData.strictProxy === true,
+      maxFailover: Math.max(1, Number(formData.maxFailover) || 2),
+      allowFallbackDirect: formData.allowFallbackDirect === true,
+      priority: Math.max(1, Number(formData.priority) || 50),
+      maxConcurrency: Math.max(0, Math.floor(Number(formData.maxConcurrency) || 0)),
+      weight: Math.min(100, Math.max(0, Math.floor(Number(formData.weight) || 0))),
+      tags: formData.tags.trim(),
+      autoUnbind: formData.autoUnbind === true,
     };
 
     if (!payload.name || !payload.proxyUrl) return;
@@ -563,6 +645,73 @@ export default function ProxyPoolsPage() {
     [proxyPools]
   );
 
+  const allTags = useMemo(() => {
+    const set = new Set();
+    proxyPools.forEach((p) => (p.tags || "").split(",").map((t) => t.trim()).filter(Boolean).forEach((t) => set.add(t)));
+    return [...set];
+  }, [proxyPools]);
+
+  const filteredPools = useMemo(
+    () => (tagFilter ? proxyPools.filter((p) => (p.tags || "").split(",").map((t) => t.trim()).includes(tagFilter)) : proxyPools),
+    [proxyPools, tagFilter]
+  );
+
+  const EXPORT_FIELDS = ["name", "proxyUrl", "noProxy", "type", "isActive", "strictProxy", "maxFailover", "allowFallbackDirect", "tags", "autoUnbind"];
+
+  const handleExportJson = () => {
+    if (proxyPools.length === 0) return;
+    const exportData = proxyPools.map((pool) => {
+      const out = {};
+      for (const k of EXPORT_FIELDS) out[k] = pool[k];
+      return out;
+    });
+    const blob = new Blob([JSON.stringify({ pools: exportData }, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "proxy-pools-export.json";
+    a.click();
+    URL.revokeObjectURL(url);
+    notify.success(`Exported ${exportData.length} pools`);
+  };
+
+  const handleJsonImport = async () => {
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonImportText);
+    } catch {
+      notify.error("Invalid JSON");
+      return;
+    }
+    const pools = Array.isArray(parsed) ? parsed : parsed?.pools;
+    if (!Array.isArray(pools) || pools.length === 0) {
+      notify.warning("No pools found in JSON");
+      return;
+    }
+    setJsonImporting(true);
+    try {
+      const res = await fetch("/api/proxy-pools/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pools }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        await fetchProxyPools();
+        setShowJsonImportModal(false);
+        setJsonImportText("");
+        notify.success(`Imported: created ${data.created}, skipped ${data.skipped}, failed ${data.failed}`);
+      } else {
+        notify.error(data.error || "Import failed");
+      }
+    } catch (error) {
+      console.log("Error importing proxy pools:", error);
+      notify.error("Import failed");
+    } finally {
+      setJsonImporting(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-4 px-1 sm:gap-6 sm:px-0">
@@ -632,11 +781,48 @@ export default function ProxyPoolsPage() {
           <Button size="sm" variant="secondary" icon="upload" onClick={openBatchImportModal}>
             Batch Import
           </Button>
+          <Button size="sm" variant="secondary" icon="download" onClick={handleExportJson} disabled={proxyPools.length === 0}>
+            Export JSON
+          </Button>
+          <Button size="sm" variant="secondary" icon="file_open" onClick={() => setShowJsonImportModal(true)}>
+            Import JSON
+          </Button>
           <Button size="sm" icon="add" onClick={openCreateModal}>Add Proxy Pool</Button>
         </div>
       </div>
 
       <Card>
+        {/* Health summary (D1) */}
+        <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+          {[
+            { label: "Total", value: proxyPools.length, cls: "" },
+            { label: "Active", value: activeCount, cls: "text-green-600" },
+            { label: "In cooldown", value: proxyPools.filter(isInCooldown).length, cls: "text-red-500" },
+            { label: "Error", value: proxyPools.filter((p) => p.testStatus === "error").length, cls: "text-red-500" },
+            {
+              label: "Avg ok",
+              value: (() => {
+                const rates = proxyPools.map(getSuccessRate).filter((r) => r != null);
+                return rates.length ? `${Math.round(rates.reduce((a, b) => a + b, 0) / rates.length)}%` : "—";
+              })(),
+              cls: "",
+            },
+            {
+              label: "Avg latency",
+              value: (() => {
+                const lats = proxyPools.map((p) => p.avgLatencyMs).filter((v) => v != null && Number.isFinite(Number(v)));
+                return lats.length ? `${Math.round(lats.reduce((a, b) => a + Number(b), 0) / lats.length)}ms` : "—";
+              })(),
+              cls: "",
+            },
+          ].map((s) => (
+            <div key={s.label} className="rounded-lg border border-black/5 dark:border-white/10 bg-black/[0.02] dark:bg-white/[0.03] px-3 py-2">
+              <p className="text-[11px] text-text-muted">{s.label}</p>
+              <p className={`text-sm font-semibold ${s.cls}`}>{s.value}</p>
+            </div>
+          ))}
+        </div>
+
         <div className="mb-4 flex flex-wrap items-center gap-2">
           {proxyPools.length > 0 && (
             <label className="flex items-center gap-1.5 text-xs text-text-muted cursor-pointer">
@@ -652,6 +838,27 @@ export default function ProxyPoolsPage() {
           <Badge variant="default">Total: {proxyPools.length}</Badge>
           <Badge variant="success">Active: {activeCount}</Badge>
         </div>
+
+        {/* Tag filter chips (C4) */}
+        {allTags.length > 0 && (
+          <div className="mb-3 flex flex-wrap items-center gap-1.5">
+            <button
+              onClick={() => setTagFilter(null)}
+              className={`rounded-full px-2.5 py-0.5 text-[11px] border transition-colors ${tagFilter === null ? "border-primary bg-primary/10 text-primary" : "border-black/10 dark:border-white/10 text-text-muted hover:text-text-main"}`}
+            >
+              All
+            </button>
+            {allTags.map((tag) => (
+              <button
+                key={tag}
+                onClick={() => setTagFilter(tagFilter === tag ? null : tag)}
+                className={`rounded-full px-2.5 py-0.5 text-[11px] border transition-colors ${tagFilter === tag ? "border-primary bg-primary/10 text-primary" : "border-black/10 dark:border-white/10 text-text-muted hover:text-text-main"}`}
+              >
+                #{tag}
+              </button>
+            ))}
+          </div>
+        )}
 
         {(selectedIds.length > 0 || healthChecking) && (
           <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2">
@@ -688,9 +895,9 @@ export default function ProxyPoolsPage() {
           </div>
         )}
 
-        {proxyPools.length === 0 ? (
+        {filteredPools.length === 0 ? (
           <div className="text-center py-10">
-            <p className="text-text-main font-medium mb-1">No proxy pool entries yet</p>
+            <p className="text-text-main font-medium mb-1">{tagFilter ? `No pools with tag #${tagFilter}` : "No proxy pool entries yet"}</p>
             <p className="text-sm text-text-muted mb-4">
               Create a proxy pool entry, then assign it to connections.
             </p>
@@ -698,7 +905,7 @@ export default function ProxyPoolsPage() {
           </div>
         ) : (
           <div className="flex flex-col divide-y divide-black/[0.04] dark:divide-white/[0.05]">
-            {proxyPools.map((pool) => (
+            {filteredPools.map((pool) => (
               <div key={pool.id} className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex items-start gap-3 min-w-0 flex-1">
                   <input
@@ -716,12 +923,26 @@ export default function ProxyPoolsPage() {
                     <Badge variant={pool.isActive ? "success" : "default"} size="sm">
                       {pool.isActive ? "active" : "inactive"}
                     </Badge>
+                    {isInCooldown(pool) && (
+                      <Badge variant="error" size="sm" dot>
+                        cooldown · {pool.consecutiveFailures || 0} fails
+                      </Badge>
+                    )}
                     {pool.type === "vercel" && (
                       <Badge variant="default" size="sm">vercel relay</Badge>
                     )}
                     {pool.type === "cloudflare" && (
                       <Badge variant="default" size="sm">cloudflare relay</Badge>
                     )}
+                    {/^socks(4|4a|5|5h)?:\/\//i.test(pool.proxyUrl || "") && (
+                      <Badge variant="default" size="sm">socks</Badge>
+                    )}
+                    {pool.allowFallbackDirect === false && (
+                      <Badge variant="error" size="sm">no direct fallback</Badge>
+                    )}
+                    {(pool.tags || "").split(",").map((t) => t.trim()).filter(Boolean).map((t) => (
+                      <Badge key={t} variant="default" size="sm">#{t}</Badge>
+                    ))}
                     <Badge variant="default" size="sm">
                       {pool.boundConnectionCount || 0} bound
                     </Badge>
@@ -730,10 +951,21 @@ export default function ProxyPoolsPage() {
                   {pool.noProxy ? (
                     <p className="text-xs text-text-muted truncate">No proxy: {pool.noProxy}</p>
                   ) : null}
-                  <p className="text-[11px] text-text-muted mt-1">
-                    Last tested: {formatDateTime(pool.lastTestedAt)}
-                    {pool.lastError ? ` · ${pool.lastError}` : ""}
-                  </p>
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-text-muted mt-1">
+                    <span title="Requests">req: {formatNumber(pool.requestCount)}</span>
+                    <span title="Success rate" className={getSuccessRate(pool) != null && getSuccessRate(pool) < 90 ? "text-red-500" : ""}>
+                      ok: {getSuccessRate(pool) != null ? `${getSuccessRate(pool)}%` : "—"}
+                    </span>
+                    <span title="Average latency">avg: {formatMs(pool.avgLatencyMs)}</span>
+                    <Sparkline points={pool.latencyHistory} />
+                    <span title="Last tested">tested: {formatDateTime(pool.lastTestedAt)}</span>
+                    {isInCooldown(pool) && pool.cooldownUntil ? (
+                      <span className="text-red-500">until {formatDateTime(pool.cooldownUntil)}</span>
+                    ) : null}
+                    {pool.lastError ? (
+                      <span title={pool.lastError} className="truncate max-w-[16rem] text-red-500">{pool.lastError}</span>
+                    ) : null}
+                  </div>
                   </div>
                 </div>
 
@@ -802,6 +1034,36 @@ export default function ProxyPoolsPage() {
               {importing ? "Importing..." : "Import"}
             </Button>
             <Button fullWidth variant="ghost" onClick={closeBatchImportModal} disabled={importing}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={showJsonImportModal}
+        title="Import Proxy Pools (JSON)"
+        onClose={() => { if (jsonImporting) return; setShowJsonImportModal(false); }}
+      >
+        <div className="flex flex-col gap-4">
+          <div>
+            <label className="text-sm font-medium text-text-main mb-1 block">Paste JSON (array or {"{ pools: [...] }"})</label>
+            <textarea
+              value={jsonImportText}
+              onChange={(e) => setJsonImportText(e.target.value)}
+              placeholder={'{"pools": [{"name": "Office", "proxyUrl": "http://127.0.0.1:7897"}]}'}
+              className="w-full min-h-[180px] py-2 px-3 text-sm text-text-main bg-white dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-md focus:ring-1 focus:ring-primary/30 focus:border-primary/50 focus:outline-none transition-all"
+            />
+            <p className="text-xs text-text-muted mt-1">
+              Use Export JSON to get a template. Pools with an existing proxy URL are skipped.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <Button fullWidth onClick={handleJsonImport} disabled={!jsonImportText.trim() || jsonImporting}>
+              {jsonImporting ? "Importing..." : "Import"}
+            </Button>
+            <Button fullWidth variant="ghost" onClick={() => setShowJsonImportModal(false)} disabled={jsonImporting}>
               Cancel
             </Button>
           </div>
@@ -1000,7 +1262,8 @@ export default function ProxyPoolsPage() {
             label="Proxy URL"
             value={formData.proxyUrl}
             onChange={(e) => setFormData((prev) => ({ ...prev, proxyUrl: e.target.value }))}
-            placeholder="http://127.0.0.1:7897"
+            placeholder="http://127.0.0.1:7890 or socks5://user:pass@127.0.0.1:7890"
+            hint="Supports http(s) and socks4/socks5 (auth optional — e.g. socks5://user:pass@127.0.0.1:7890)"
           />
           <Input
             label="No Proxy"
@@ -1008,6 +1271,46 @@ export default function ProxyPoolsPage() {
             onChange={(e) => setFormData((prev) => ({ ...prev, noProxy: e.target.value }))}
             placeholder="localhost,127.0.0.1,.internal"
             hint="Comma-separated hosts/domains to bypass proxy"
+          />
+          <Input
+            label="Tags"
+            value={formData.tags}
+            onChange={(e) => setFormData((prev) => ({ ...prev, tags: e.target.value }))}
+            placeholder="home,us-west,high-bandwidth"
+            hint="Comma-separated labels for filtering"
+          />
+          <Input
+            label="Max Failover"
+            type="number"
+            min={1}
+            value={formData.maxFailover}
+            onChange={(e) => setFormData((prev) => ({ ...prev, maxFailover: e.target.value }))}
+            hint="Max other pools tried before falling back"
+          />
+          <Input
+            label="Failover Priority"
+            type="number"
+            min={1}
+            value={formData.priority}
+            onChange={(e) => setFormData((prev) => ({ ...prev, priority: e.target.value }))}
+            hint="Lower = tried first when failing over; ties broken by health score"
+          />
+          <Input
+            label="Max Concurrency"
+            type="number"
+            min={0}
+            value={formData.maxConcurrency}
+            onChange={(e) => setFormData((prev) => ({ ...prev, maxConcurrency: e.target.value }))}
+            hint="0 = unlimited. Caps simultaneous requests through this pool."
+          />
+          <Input
+            label="Manual Weight"
+            type="number"
+            min={0}
+            max={100}
+            value={formData.weight}
+            onChange={(e) => setFormData((prev) => ({ ...prev, weight: e.target.value }))}
+            hint="0 = auto (health score). 1-100 blends 50/50 with health score."
           />
 
           <div className="flex flex-col gap-3 rounded-lg border border-border/50 p-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1030,6 +1333,30 @@ export default function ProxyPoolsPage() {
             <Toggle
               checked={formData.strictProxy === true}
               onChange={() => setFormData((prev) => ({ ...prev, strictProxy: !prev.strictProxy }))}
+              disabled={saving}
+            />
+          </div>
+
+          <div className="flex flex-col gap-3 rounded-lg border border-border/50 p-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="font-medium text-sm">Allow Direct Fallback</p>
+              <p className="text-xs text-text-muted">If all pools fail, fall back to a direct request. Off = hard fail like Strict Proxy.</p>
+            </div>
+            <Toggle
+              checked={formData.allowFallbackDirect === true}
+              onChange={() => setFormData((prev) => ({ ...prev, allowFallbackDirect: !prev.allowFallbackDirect }))}
+              disabled={saving}
+            />
+          </div>
+
+          <div className="flex flex-col gap-3 rounded-lg border border-border/50 p-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="font-medium text-sm">Auto-unbind when dead</p>
+              <p className="text-xs text-text-muted">Detach connections from this pool automatically once it enters cooldown.</p>
+            </div>
+            <Toggle
+              checked={formData.autoUnbind === true}
+              onChange={() => setFormData((prev) => ({ ...prev, autoUnbind: !prev.autoUnbind }))}
               disabled={saving}
             />
           </div>

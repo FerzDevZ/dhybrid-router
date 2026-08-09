@@ -16,6 +16,13 @@ function normalizeProxyPoolInput(body = {}) {
   const isActive = body?.isActive === undefined ? true : body.isActive === true;
   const strictProxy = body?.strictProxy === true;
   const type = VALID_PROXY_TYPES.includes(body?.type) ? body.type : "http";
+  const maxFailover = Number.isInteger(body?.maxFailover) && body.maxFailover >= 1 ? body.maxFailover : 2;
+  const allowFallbackDirect = body?.allowFallbackDirect === undefined ? true : body.allowFallbackDirect === true;
+  const priority = Number.isInteger(body?.priority) && body.priority >= 1 ? body.priority : 50;
+  const maxConcurrency = Number.isInteger(body?.maxConcurrency) && body.maxConcurrency >= 1 ? body.maxConcurrency : 0;
+  const weight = Number.isInteger(body?.weight) && body.weight >= 1 && body.weight <= 100 ? body.weight : 0;
+  const tags = typeof body?.tags === "string" ? body.tags.trim() : "";
+  const autoUnbind = body?.autoUnbind === undefined ? true : body.autoUnbind === true;
 
   if (!name) {
     return { error: "Name is required" };
@@ -25,8 +32,10 @@ function normalizeProxyPoolInput(body = {}) {
     return { error: "Proxy URL is required" };
   }
 
-  return { name, proxyUrl, noProxy, isActive, strictProxy, type };
+  return { name, proxyUrl, noProxy, isActive, strictProxy, type, maxFailover, allowFallbackDirect, priority, maxConcurrency, weight, tags, autoUnbind };
 }
+
+export { normalizeProxyPoolInput };
 
 function buildUsageMap(connections = []) {
   const usageMap = new Map();

@@ -87,6 +87,21 @@ export function reorderByCapabilities(models, required) {
  */
 const comboRotationState = new Map();
 
+// Combo memory (B2): last successful model per combo (fallback strategy only).
+// The next request tries the last-known-good model first instead of re-walking
+// the whole fallback chain.
+const comboMemory = new Map();
+
+export function rememberComboSuccess(comboName, modelStr) {
+  if (!comboName || !modelStr) return;
+  comboMemory.set(comboName, modelStr);
+}
+
+export function resetComboMemory(comboName) {
+  if (comboName) comboMemory.delete(comboName);
+  else comboMemory.clear();
+}
+
 // Trailing run of items after the last assistant/model turn = the current user
 // turn. It may span several messages (e.g. text + image split across blocks),
 // so we return all of them. History media (older turns) must not pin the combo
@@ -247,6 +262,16 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
   // Apply rotation strategy if enabled
   let rotatedModels = getRotatedModels(models, comboName, comboStrategy, comboStickyLimit);
 
+  // Combo memory: try the last-known-good model first (fallback strategy only;
+  // round-robin must keep its own fair rotation).
+  if (comboStrategy !== "round-robin" && comboName) {
+    const remembered = comboMemory.get(comboName);
+    if (remembered && rotatedModels.includes(remembered) && rotatedModels[0] !== remembered) {
+      rotatedModels = [remembered, ...rotatedModels.filter((m) => m !== remembered)];
+      log.info("COMBO", `memory: last-good ${remembered} moved to front`);
+    }
+  }
+
   // Auto-switch: float models that satisfy the request's required capabilities to the front.
   if (autoSwitch) {
     const required = detectRequiredCapabilities(body);
@@ -273,6 +298,7 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       // Success (2xx) - return response
       if (result.ok) {
         log.info("COMBO", `Model ${modelStr} succeeded`);
+        rememberComboSuccess(comboName, modelStr);
         return result;
       }
 

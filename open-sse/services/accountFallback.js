@@ -18,7 +18,7 @@ export function getQuotaCooldown(backoffLevel = 0) {
  * @param {number} status - HTTP status code
  * @param {string} errorText - Error message text
  * @param {number} backoffLevel - Current backoff level for exponential backoff
- * @returns {{ shouldFallback: boolean, cooldownMs: number, newBackoffLevel?: number }}
+ * @returns {{ shouldFallback: boolean, cooldownMs: number, newBackoffLevel?: number, permanent?: boolean }}
  */
 export function checkFallbackError(status, errorText, backoffLevel = 0) {
   const lowerError = errorText
@@ -26,6 +26,14 @@ export function checkFallbackError(status, errorText, backoffLevel = 0) {
     : "";
 
   for (const rule of ERROR_RULES) {
+    // Permanent error (client/model fault): no fallback, no account lock — return as-is
+    if (rule.permanent && (
+      (rule.text && lowerError && lowerError.includes(rule.text)) ||
+      (rule.status && rule.status === status)
+    )) {
+      return { shouldFallback: false, cooldownMs: 0, permanent: true };
+    }
+
     // Text-based rule: match substring in error message
     if (rule.text && lowerError && lowerError.includes(rule.text)) {
       if (rule.backoff) {
