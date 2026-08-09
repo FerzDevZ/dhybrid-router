@@ -7,6 +7,12 @@ import { makeKv } from "@/lib/db/helpers/kvStore.js";
 import { sendNotification } from "@/lib/notifications";
 import * as log from "../utils/logger.js";
 
+// Local normalizeString (copied from proxyTest.js to avoid circular deps)
+function normalizeString(value) {
+  if (value === undefined || value === null) return "";
+  return String(value).trim();
+}
+
 // Mutex to prevent race conditions during account selection
 let selectionMutex = Promise.resolve();
 
