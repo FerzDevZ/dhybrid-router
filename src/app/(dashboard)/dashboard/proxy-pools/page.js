@@ -105,6 +105,7 @@ export default function ProxyPoolsPage() {
   const [healthProgress, setHealthProgress] = useState({ current: 0, total: 0 });
   const [bulkBusy, setBulkBusy] = useState(false);
   const [confirmState, setConfirmState] = useState(null);
+  const [deadActionState, setDeadActionState] = useState(null); // { deadIds, alive }
   const relayMenuRef = useRef(null);
   const notify = useNotificationStore();
 
@@ -383,32 +384,58 @@ export default function ProxyPoolsPage() {
     setHealthProgress({ current: 0, total: 0 });
 
     if (deadIds.length > 0) {
-      setConfirmState({
-        title: "Disable Dead Proxies",
-        message: `Alive: ${alive}, Dead: ${deadIds.length}.\n\nDisable ${deadIds.length} dead proxies?`,
-        onConfirm: async () => {
-          setConfirmState(null);
-          setBulkBusy(true);
-          try {
-            for (const id of deadIds) {
-              try {
-                await fetch(`/api/proxy-pools/${id}`, {
-                  method: "PUT",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ isActive: false }),
-                });
-              } catch {}
-            }
-            await fetchProxyPools();
-            notify.success(`Disabled ${deadIds.length} dead proxies`);
-          } finally {
-            setBulkBusy(false);
-          }
-        }
-      });
+      // Show 3-option dialog instead of simple confirm
+      setDeadActionState({ deadIds, alive });
     } else {
       notify.success(`Health check done. Alive: ${alive}, Dead: ${deadIds.length}`);
     }
+  };
+
+  const handleDeadDisable = async ({ deadIds }) => {
+    setDeadActionState(null);
+    setBulkBusy(true);
+    try {
+      let ok = 0;
+      for (const id of deadIds) {
+        try {
+          const res = await fetch(`/api/proxy-pools/${id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ isActive: false }),
+          });
+          if (res.ok) ok += 1;
+        } catch {}
+      }
+      await fetchProxyPools();
+      notify.success(`Disabled ${ok}/${deadIds.length} dead proxies`);
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const handleDeadDelete = async ({ deadIds }) => {
+    setDeadActionState(null);
+    setBulkBusy(true);
+    try {
+      let ok = 0, blocked = 0, failed = 0;
+      for (const id of deadIds) {
+        try {
+          const res = await fetch(`/api/proxy-pools/${id}`, { method: "DELETE" });
+          if (res.ok) ok += 1;
+          else if (res.status === 409) blocked += 1;
+          else failed += 1;
+        } catch { failed += 1; }
+      }
+      await fetchProxyPools();
+      notify.success(`Deleted ${ok}${blocked ? `, ${blocked} bound` : ""}${failed ? `, ${failed} failed` : ""}`);
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const handleDeadKeep = () => {
+    setDeadActionState(null);
+    notify.info("Dead proxies kept as-is");
   };
 
   // Cleanup selectedIds when pools change
@@ -1414,6 +1441,50 @@ export default function ProxyPoolsPage() {
         message={confirmState?.message}
         variant="danger"
       />
+
+      {/* Dead Action Dialog - 3 options: Disable / Keep / Delete */}
+      {deadActionState && (
+        <Modal
+          isOpen={true}
+          onClose={() => setDeadActionState(null)}
+          title="Dead Proxies Found"
+          size="md"
+          footer={
+            <div className="flex items-center justify-end gap-2 w-full">
+              <Button variant="ghost" onClick={() => handleDeadKeep()} className="flex-1">
+                Keep
+              </Button>
+              <Button variant="default" onClick={() => handleDeadDisable(deadActionState)} className="flex-1">
+                Disable
+              </Button>
+              <Button variant="danger" onClick={() => handleDeadDelete(deadActionState)} className="flex-1">
+                Delete
+              </Button>
+            </div>
+          }
+        >
+          <p className="text-text-muted mb-2">
+            Health check complete: <strong>{deadActionState.alive} alive</strong>, <strong>{deadActionState.deadIds.length} dead</strong>.
+          </p>
+          <p className="text-sm text-text-muted">
+            Choose action for dead proxies:
+          </p>
+          <div className="mt-4 grid grid-cols-3 gap-2 text-center text-xs">
+            <div className="p-3 rounded-lg bg-surface-2">
+              <div className="font-medium text-text-main">Keep</div>
+              <div className="text-text-muted">Biarkan apa adanya (aktif/error)</div>
+            </div>
+            <div className="p-3 rounded-lg bg-surface-2">
+              <div className="font-medium text-text-main">Disable</div>
+              <div className="text-text-muted">Matikan (isActive=false), simpan di DB</div>
+            </div>
+            <div className="p-3 rounded-lg bg-surface-2">
+              <div className="font-medium text-text-main">Delete</div>
+              <div className="text-text-muted">Hapus permanen dari database</div>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
