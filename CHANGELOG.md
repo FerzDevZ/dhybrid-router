@@ -24,6 +24,15 @@
   `ferzdevz/dhybrid-router` on `v*` tags
 
 ## Fixed
+- `npm start` now runs `node custom-server.js`: `PORT`/`HOSTNAME` env are honored
+  and the standalone warning from `next start` is gone; custom-server resolves
+  the standalone entry in both repo (`.next/standalone/`) and Docker/CLI layouts
+- Removed dead dynamic imports in custom-server — the `@/` alias never resolves
+  outside the Next bundle, so both monitors always failed there and logged a
+  misleading `tick failed` warning; the app bootstrap (`initializeApp`) already
+  starts proxy-health and token-refresh
+- Fill-first selection: explicit connection priority now wins; the learned
+  account score is only a tiebreak (it previously dominated priority)
 - Per-key rate limit & daily quota now also cover embeddings, image and video
   generation endpoints (previously only chat)
 - Golden `User-Agent` snapshots refreshed for the `9Router/0.6.0` version string

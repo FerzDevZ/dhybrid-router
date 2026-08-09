@@ -423,9 +423,10 @@ async function pickByAdaptiveScore(connections) {
     c,
     score: await getAccountScore(c.id),
   })));
+  // Explicit priority wins; learning score is the tiebreak, then recency.
   scored.sort((a, b) =>
-    b.score.score - a.score.score ||
     (a.c.priority ?? 999) - (b.c.priority ?? 999) ||
+    b.score.score - a.score.score ||
     (b.score.lastSuccessAt || 0) - (a.score.lastSuccessAt || 0)
   );
   return scored[0]?.c || connections[0];
