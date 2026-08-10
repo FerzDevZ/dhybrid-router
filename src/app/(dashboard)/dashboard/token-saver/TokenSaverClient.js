@@ -647,12 +647,16 @@ export default function TokenSaverClient() {
     ctx.font = "10px monospace";
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
-    const labelCount = Math.min(6, data.length);
-    for (let i = 0; i < labelCount; i++) {
-      const idx = Math.round(i * (data.length - 1) / (labelCount - 1));
-      const d = data[idx];
-      const x = padding.left + idx * xStep;
-      ctx.fillText(d.date.slice(5), x, padding.top + chartHeight + 4);
+    if (data.length === 1) {
+      ctx.fillText(data[0].date.slice(5), padding.left, padding.top + chartHeight + 4);
+    } else {
+      const labelCount = Math.min(6, data.length);
+      for (let i = 0; i < labelCount; i++) {
+        const idx = Math.round(i * (data.length - 1) / (labelCount - 1));
+        const d = data[idx];
+        const x = padding.left + idx * xStep;
+        ctx.fillText(d.date.slice(5), x, padding.top + chartHeight + 4);
+      }
     }
   }, [tokenSaverStats]);
 
