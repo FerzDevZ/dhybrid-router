@@ -4,6 +4,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 const lookupMock = vi.fn();
 vi.mock("node:dns/promises", () => ({ lookup: (...a) => lookupMock(...a) }));
 
+// production calls lookup(hostname, { all: true }) → promise of [{address,family},...]
+const asAllRecords = (record) => Array.isArray(record) ? record : [{ address: record.address, family: record.family ?? 4 }];
+
 import { fetchImageAsBase64 } from "../../open-sse/translator/concerns/image.js";
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -23,7 +26,11 @@ function mockFetchOnce(bytes, ok = true) {
 
 beforeEach(() => {
   lookupMock.mockReset();
-  lookupMock.mockResolvedValue({ address: "93.184.216.34" }); // public by default
+  // honor production's { all: true } form: resolve to a records array
+  lookupMock.mockImplementation(async (_h, opts) => {
+    if (opts && opts.all) return [{ address: "93.184.216.34", family: 4 }];
+    return { address: "93.184.216.34", family: 4 };
+  });
 });
 afterEach(() => { vi.restoreAllMocks(); });
 
@@ -34,12 +41,12 @@ describe("fetchImageAsBase64 hardening", () => {
   });
 
   it("SSRF: rejects private IP (10.x)", async () => {
-    lookupMock.mockResolvedValue({ address: "10.0.0.5" });
+    lookupMock.mockResolvedValue([{ address: "10.0.0.5", family: 4 }]);
     expect(await fetchImageAsBase64("http://internal.example/x.png")).toBeNull();
   });
 
   it("SSRF: rejects cloud metadata 169.254.169.254", async () => {
-    lookupMock.mockResolvedValue({ address: "169.254.169.254" });
+    lookupMock.mockResolvedValue([{ address: "169.254.169.254", family: 4 }]);
     expect(await fetchImageAsBase64("http://metadata/x.png")).toBeNull();
   });
 
@@ -48,7 +55,7 @@ describe("fetchImageAsBase64 hardening", () => {
   });
 
   it("SSRF: rejects IPv6 loopback", async () => {
-    lookupMock.mockResolvedValue({ address: "::1" });
+    lookupMock.mockResolvedValue([{ address: "::1", family: 6 }]);
     expect(await fetchImageAsBase64("http://x/y.png")).toBeNull();
   });
 

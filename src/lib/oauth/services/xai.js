@@ -48,31 +48,36 @@ export function validateOAuthEndpoint(rawUrl, field) {
 
 /**
  * Discover authorization + token endpoints. Cached process-wide.
+ * @param {{ fetchImpl?: typeof fetch }} [opts] - inject fetch for tests.
  */
-export async function discoverEndpoints() {
-  if (cachedDiscovery) return cachedDiscovery;
+export async function discoverEndpoints(opts = {}) {
+  if (cachedDiscovery && !opts.fetchImpl) return cachedDiscovery;
 
+  const fetchFn = opts.fetchImpl || fetch;
   try {
-    const res = await fetch(XAI_CONFIG.discoveryUrl, {
+    const res = await fetchFn(XAI_CONFIG.discoveryUrl, {
       headers: { Accept: "application/json" },
     });
     if (res.ok) {
       const data = await res.json();
-      cachedDiscovery = {
+      const discovered = {
         authorizeUrl: validateOAuthEndpoint(data.authorization_endpoint, "authorization_endpoint"),
         tokenUrl: validateOAuthEndpoint(data.token_endpoint, "token_endpoint"),
       };
-      return cachedDiscovery;
+      // only cache the real-fetch result; injected fetch is for tests / one-offs
+      if (!opts.fetchImpl) cachedDiscovery = discovered;
+      return discovered;
     }
   } catch {
     // fall through to static fallback
   }
 
-  cachedDiscovery = {
+  const fallback = {
     authorizeUrl: XAI_CONFIG.authorizeUrl,
     tokenUrl: XAI_CONFIG.tokenUrl,
   };
-  return cachedDiscovery;
+  if (!opts.fetchImpl) cachedDiscovery = fallback;
+  return fallback;
 }
 
 /**

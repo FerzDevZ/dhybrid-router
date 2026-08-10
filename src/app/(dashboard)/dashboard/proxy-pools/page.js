@@ -74,6 +74,7 @@ function normalizeFormData(data = {}) {
     tags: data.tags || "",
     autoUnbind: data.autoUnbind !== false,
     autoDelete: data.autoDelete === true,
+    geolocation: data.geolocation && typeof data.geolocation === "object" ? data.geolocation : null,
   };
 }
 
@@ -197,6 +198,9 @@ export default function ProxyPoolsPage() {
       tags: formData.tags.trim(),
       autoUnbind: formData.autoUnbind === true,
       autoDelete: formData.autoDelete === true,
+      geolocation: formData.geolocation && (formData.geolocation.country || formData.geolocation.city || formData.geolocation.region)
+        ? formData.geolocation
+        : null,
     };
 
     if (!payload.name || !payload.proxyUrl) return;
@@ -1415,6 +1419,41 @@ export default function ProxyPoolsPage() {
               onChange={() => setFormData((prev) => ({ ...prev, autoDelete: !prev.autoDelete }))}
               disabled={saving}
             />
+          </div>
+
+          <div className="rounded-lg border border-border/50 p-3 space-y-2">
+            <p className="font-medium text-sm">Geolocation (optional — used by smart routing)</p>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <Input
+                label="Country code (e.g. US, SG)"
+                value={formData.geolocation?.country || ""}
+                onChange={(e) => setFormData((prev) => ({
+                  ...prev,
+                  geolocation: { ...prev.geolocation, country: e.target.value.trim().toUpperCase() || undefined },
+                }))}
+                disabled={saving}
+                maxLength={2}
+              />
+              <Input
+                label="Region / state (optional)"
+                value={formData.geolocation?.region || ""}
+                onChange={(e) => setFormData((prev) => ({
+                  ...prev,
+                  geolocation: { ...prev.geolocation, region: e.target.value.trim() || undefined },
+                }))}
+                disabled={saving}
+              />
+              <Input
+                label="City (optional)"
+                value={formData.geolocation?.city || ""}
+                onChange={(e) => setFormData((prev) => ({
+                  ...prev,
+                  geolocation: { ...prev.geolocation, city: e.target.value.trim() || undefined },
+                }))}
+                disabled={saving}
+              />
+            </div>
+            <p className="text-[11px] text-text-muted">Country is matched case-insensitively by <code>PROXY_TARGET_REGION</code> env or per-request geo hints.</p>
           </div>
 
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">

@@ -27,9 +27,14 @@ describe("DB Concurrency — atomic safety", () => {
   it("100 parallel saveRequestUsage → no count loss", async () => {
     const N = 100;
     const promises = [];
+    const baseTs = Date.now();
     for (let i = 0; i < N; i++) {
+      // unique timestamp per call: saveRequestUsage dedupes identical rows
+      // (same ms-timestamp + provider/model/connectionId/apiKey + token counts),
+      // so identical payloads would collapse into one row.
       promises.push(db.saveRequestUsage({
         provider: "openai", model: "gpt-4", connectionId: "c1",
+        timestamp: new Date(baseTs + i).toISOString(),
         tokens: { prompt_tokens: 10, completion_tokens: 5 },
         endpoint: "/v1/chat", status: "ok",
       }));
@@ -152,9 +157,11 @@ describe("DB Concurrency — atomic safety", () => {
   it("daily summary aggregates correctly under parallel writes", async () => {
     const N = 50;
     const promises = [];
+    const baseTs = Date.now();
     for (let i = 0; i < N; i++) {
       promises.push(db.saveRequestUsage({
         provider: "google", model: "gemini-pro", connectionId: "cG",
+        timestamp: new Date(baseTs + i).toISOString(), // unique → no dedupe collapse
         tokens: { prompt_tokens: 100, completion_tokens: 50 },
         status: "ok",
       }));

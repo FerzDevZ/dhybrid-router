@@ -42,6 +42,40 @@ function StatCard({ title, value, subtitle, icon, color = "primary" }) {
   );
 }
 
+// Build a flat CSV of per-model + per-provider savings and trigger a download.
+function exportTokenSaverStatsCsv(stats) {
+  if (!stats) return;
+  const esc = (s) => `"${String(s ?? "").replace(/"/g, '""')}"`;
+  const lines = ["type,name,requests,rtk_bytes,headroom_tokens,pxpipe_bytes,imgs,total_saved"];
+  for (const p of stats.byProvider || []) {
+    lines.push(["provider", esc(p.name), p.requests, p.rtk, p.headroom, p.pxpipe, p.img, p.tokensSaved].join(","));
+  }
+  for (const m of stats.byModel || []) {
+    lines.push(["model", esc(m.name), m.requests, m.rtk, m.headroom, m.pxpipe, m.img, m.tokensSaved].join(","));
+  }
+  for (const d of stats.timeline || []) {
+    lines.push([
+      "day",
+      d.date,
+      d.requests,
+      d.rtk?.tokensSaved ?? 0,
+      d.headroom?.tokensSaved ?? 0,
+      d.pxpipe?.tokensSavedEst ?? 0,
+      "",
+      (d.rtk?.tokensSaved ?? 0) + (d.headroom?.tokensSaved ?? 0) + (d.pxpipe?.tokensSavedEst ?? 0),
+    ].join(","));
+  }
+  const blob = new Blob([lines.join("\n") + "\n"], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `token-saver-stats-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 export default function TokenSaverClient() {
   const [rtkEnabled, setRtkEnabledState] = useState(true);
   const [headroomEnabled, setHeadroomEnabled] = useState(false);
@@ -717,6 +751,88 @@ export default function TokenSaverClient() {
                 />
               </div>
             </div>
+
+            {/* Per-Model / Per-Provider breakdown */}
+            {(tokenSaverStats.byModel?.length > 0 || tokenSaverStats.byProvider?.length > 0) && (
+              <div className="border-t border-border pt-6 space-y-6">
+                <div>
+                  <h4 className="font-medium text-sm mb-3">By Provider (top 10)</h4>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="text-text-muted font-normal">
+                          <th className="px-2 py-1.5 text-left">Provider</th>
+                          <th className="px-2 py-1.5 text-right">Requests</th>
+                          <th className="px-2 py-1.5 text-right">RTK</th>
+                          <th className="px-2 py-1.5 text-right">Headroom</th>
+                          <th className="px-2 py-1.5 text-right">PXPIPE</th>
+                          <th className="px-2 py-1.5 text-right">Imgs</th>
+                          <th className="px-2 py-1.5 text-right">Total Saved</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {tokenSaverStats.byProvider.slice(0, 10).map((p) => (
+                          <tr key={p.name} className="border-t border-border">
+                            <td className="px-2 py-1.5 font-medium">{p.name}</td>
+                            <td className="px-2 py-1.5 text-right">{p.requests.toLocaleString()}</td>
+                            <td className="px-2 py-1.5 text-right">{(p.rtk / 1024).toFixed(1)} KB</td>
+                            <td className="px-2 py-1.5 text-right">{(p.headroom / 1024).toFixed(1)} KB</td>
+                            <td className="px-2 py-1.5 text-right">{(p.pxpipe / 1024).toFixed(1)} KB</td>
+                            <td className="px-2 py-1.5 text-right">{p.img}</td>
+                            <td className="px-2 py-1.5 text-right font-bold text-success">
+                              {(p.tokensSaved / 1024).toFixed(1)} KB
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div>
+                  <h4 className="font-medium text-sm mb-3">By Model (top 10)</h4>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="text-text-muted font-normal">
+                          <th className="px-2 py-1.5 text-left">Model</th>
+                          <th className="px-2 py-1.5 text-right">Requests</th>
+                          <th className="px-2 py-1.5 text-right">RTK</th>
+                          <th className="px-2 py-1.5 text-right">Headroom</th>
+                          <th className="px-2 py-1.5 text-right">PXPIPE</th>
+                          <th className="px-2 py-1.5 text-right">Total Saved</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {tokenSaverStats.byModel.slice(0, 10).map((m) => (
+                          <tr key={m.name} className="border-t border-border">
+                            <td className="px-2 py-1.5 font-medium font-mono text-[11px]">{m.name}</td>
+                            <td className="px-2 py-1.5 text-right">{m.requests.toLocaleString()}</td>
+                            <td className="px-2 py-1.5 text-right">{(m.rtk / 1024).toFixed(1)} KB</td>
+                            <td className="px-2 py-1.5 text-right">{(m.headroom / 1024).toFixed(1)} KB</td>
+                            <td className="px-2 py-1.5 text-right">{(m.pxpipe / 1024).toFixed(1)} KB</td>
+                            <td className="px-2 py-1.5 text-right font-bold text-success">
+                              {(m.tokensSaved / 1024).toFixed(1)} KB
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="flex justify-end">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => exportTokenSaverStatsCsv(tokenSaverStats)}
+                  >
+                    <span className="material-symbols-outlined text-[16px]">download</span>
+                    Export CSV
+                  </Button>
+                </div>
+              </div>
+            )}
           </>
         ) : (
           <p className="text-sm text-text-muted">No stats available yet. Make some requests with token savers enabled.</p>

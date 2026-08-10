@@ -75,10 +75,10 @@ export function reorderByCapabilities(models, required) {
   };
 
   // Stable sort by tier (Array.prototype.sort is stable in modern engines).
-  return models
-    .map((m, i) => ({ m, i, t: tierOf(m) }))
-    .sort((a, b) => a.t - b.t || a.i - b.i)
-    .map((x) => x.m);
+  const indexed = models.map((m, i) => ({ m, i, t: tierOf(m) }));
+  const sorted = indexed.sort((a, b) => a.t - b.t || a.i - b.i);
+  if (sorted.every((x, i) => x.i === i)) return models; // order unchanged → keep identity
+  return sorted.map((x) => x.m);
 }
 
 /**
@@ -159,7 +159,16 @@ export function detectRequiredCapabilities(body) {
   const contents = body.contents || body.request?.contents;                      // gemini / antigravity
   for (const c of trailingUserItems(contents)) scanContent(c.parts);
 
-  // search: temporarily disabled in auto-switch (feature not wired yet).
+  // search: web_search tools (openai responses format, gemini google_search)
+  for (const tools of [body.tools, body.request?.tools]) {
+    if (!Array.isArray(tools)) continue;
+    for (const t of tools) {
+      if (!t || typeof t !== "object") continue;
+      if (t.type === "web_search" || t.type === "web-search" || t.type === "google_search") {
+        required.add("search");
+      }
+    }
+  }
 
   return required;
 }
