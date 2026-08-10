@@ -73,9 +73,12 @@ describe("DB Concurrency — atomic safety", () => {
 
   it("mixed concurrent: usage + details + connections + aliases", async () => {
     const ops = [];
+    const baseTs = Date.now();
     for (let i = 0; i < 50; i++) {
+      // unique timestamp → saveRequestUsage dedupes identical rows otherwise
       ops.push(db.saveRequestUsage({
         provider: "anthropic", model: `m-${i % 3}`, connectionId: "c2",
+        timestamp: new Date(baseTs + i).toISOString(),
         tokens: { prompt_tokens: 20 }, status: "ok",
       }));
       ops.push(db.setModelAlias(`a-${i}`, `target-${i}`));

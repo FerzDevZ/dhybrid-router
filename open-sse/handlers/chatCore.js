@@ -59,7 +59,7 @@ export function stripContinuityFields(body) {
   return body;
 }
 
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, settings }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, settings, preResolvedPlan, budgetDecision }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
   // Stable per-session color so all lines of one CLI conversation share a tag
@@ -230,11 +230,21 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // Per-request opt-out: client can bypass all token savers via header
   const tokenSaverEnabled = clientRawRequest?.headers?.[TOKEN_SAVER_HEADER]?.toLowerCase() !== "off";
 
-  // Context-aware plan: custom per-model/format savers override (if configured)
-  const saverPlan = planTokenSaver({
+  // Resolve the request path for format detection (endpoint prop from chat.js,
+  // or absolute URL from Next middleware callers).
+  let reqPath = "";
+  try {
+    reqPath = clientRawRequest?.endpoint
+      || (clientRawRequest?.url ? new URL(clientRawRequest.url).pathname : "");
+  } catch { /* non-URL input → default to body-based detection */ }
+
+  // Context-aware plan: custom per-model/format savers override (if configured).
+  // Callers may pre-resolve the plan (chat.js) so budget decisions and model
+  // degradation stay consistent; otherwise resolve here.
+  const saverPlan = preResolvedPlan || planTokenSaver({
     provider,
     model,
-    pathname: clientRawRequest?.url ? new URL(clientRawRequest.url).pathname : "",
+    pathname: reqPath,
     body: translatedBody,
     payloadBytes: estimateBodyBytes(translatedBody),
   }, settings);
@@ -308,7 +318,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       ponytail: tokenSaverEnabled && ponytailEnabledEff && ponytailLevel ? { applied: true, level: ponytailLevel } : { applied: false },
       planId: saverPlan.planId,
       planReason: saverPlan.reason,
-      budgetDecision: saverPlan.budgetDecision || null,
+      budgetDecision: budgetDecision || null,
     });
   } catch { /* stats must not break requests */ }
 

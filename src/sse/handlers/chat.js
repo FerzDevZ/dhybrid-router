@@ -12,6 +12,7 @@ import { getSettings } from "@/lib/localDb";
 import { getUsageTodayTokens } from "@/lib/db/repos/usageRepo.js";
 import { checkApiLimits, rateLimitResponse } from "@/lib/rateLimit";
 import { checkBudget, suggestDegrade } from "@/lib/tokenSaver/budgetGuard.js";
+import { planTokenSaver, estimateBodyBytes } from "@/lib/tokenSaver/planner.js";
 import { sendNotification } from "@/lib/notifications";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
@@ -297,6 +298,16 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     const chatSettings = await getSettings();
     const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
 
+    // Pre-resolve the saver plan once so budget degradation and chatCore stay
+    // consistent (planner is pure; invalid patterns never match).
+    const saverPlan = planTokenSaver({
+      provider,
+      model,
+      pathname: request?.url ? new URL(request.url).pathname : "",
+      body,
+      payloadBytes: estimateBodyBytes(body),
+    }, chatSettings);
+
     // Budget guard: block/degrade/warn before spending tokens
     const usedTodayTokens = await getUsageTodayTokens().catch(() => 0);
     const budgetCheck = checkBudget({ body, usedTodayTokens, model }, chatSettings);
@@ -305,7 +316,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       return errorResponse(HTTP_STATUS.TOO_MANY_REQUESTS, `Daily token budget exceeded (remaining ${budgetCheck.remainingTokens}); raise it in settings or wait for reset`);
     }
     if (budgetCheck.decision === "degrade" && chatSettings.tokenSaverAdvisor) {
-      const degradeTo = suggestDegrade(model);
+      const degradeTo = suggestDegrade(model, saverPlan);
       if (degradeTo) {
         log.warn("BUDGET", `degrading ${model} → ${degradeTo} (est=${budgetCheck.estimatedTokens}, remaining=${budgetCheck.remainingTokens})`);
         model = degradeTo;
@@ -343,6 +354,8 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       onPxpipeEvent: appendPxpipeEvent,
       providerThinking,
       settings: chatSettings,
+      preResolvedPlan: saverPlan,
+      budgetDecision: budgetCheck.decision,
       // Detect source format by endpoint + body
       sourceFormatOverride: request?.url ? detectFormatByEndpoint(new URL(request.url).pathname, body) : null,
       onCredentialsRefreshed: async (newCreds) => {
