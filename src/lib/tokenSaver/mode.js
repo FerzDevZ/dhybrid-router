@@ -1,7 +1,22 @@
-// Token Saver mode presets: quick-set off/lite/full/ultra.
+// Token Saver mode presets: quick-set off/low/full/super-power.
 // Each mode maps to concrete per-feature values; applying writes them as real
 // settings (no persistent override) so users can fine-tune afterwards.
 export const SAVER_MODES = ["off", "lite", "full", "ultra"];
+
+// Display names (lite → "Low", ultra → "Super-Power") + per-preset descriptions.
+export const SAVER_MODE_LABELS = {
+  off: "Off",
+  lite: "Low",
+  full: "Full",
+  ultra: "Super-Power",
+};
+
+export const SAVER_MODE_DESCRIPTIONS = {
+  off: "Semua saver mati — request dikirim apa adanya.",
+  lite: "Hemat ringan & aman: RTK + dedup pesan + history trim (60KB).",
+  full: "Seimbang & kuat: RTK + Headroom + Ponytail + dedup + trim (45KB) + summary (90KB).",
+  ultra: "Super-Power — semua saver + PXPIPE + headroom code-aware/kompress + advisor. Paling agresif.",
+};
 
 export const MODE_PRESETS = {
   off: {
@@ -51,6 +66,13 @@ export const MODE_PRESETS = {
     summaryInject: true,
     summaryInjectAboveBytes: 60000,
     headroomCompressUserMessages: true,
+    // Super-Power extras (all fail-open when not installed/available)
+    pxpipeEnabled: true,
+    pxpipeMinChars: 20000,
+    headroomMinBytes: 2048,
+    headroomCodeAware: true,
+    headroomKompress: true,
+    tokenSaverAdvisor: true,
   },
 };
 

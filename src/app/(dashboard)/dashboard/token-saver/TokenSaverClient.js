@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Card, Button, Input, Modal, Toggle, ConfirmModal } from "@/shared/components";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { getCurrentLocale, onLocaleChange } from "@/i18n/runtime";
-import { applySaverMode, detectSaverMode, SAVER_MODES } from "@/lib/tokenSaver/mode";
+import { applySaverMode, detectSaverMode, SAVER_MODES, SAVER_MODE_LABELS, SAVER_MODE_DESCRIPTIONS } from "@/lib/tokenSaver/mode";
 import {
   WENYAN_LOCALES,
   CAVEMAN_LEVELS,
@@ -127,6 +127,7 @@ export default function TokenSaverClient() {
   // Mode preset quick-set (off|lite|full|ultra)
   const [saverMode, setSaverMode] = useState("off");
   const [saverModeMsg, setSaverModeMsg] = useState("");
+  const [saverModeConfirm, setSaverModeConfirm] = useState(null);
   const [pxpipeStatus, setPxpipeStatus] = useState({
     installed: false,
     installing: false,
@@ -572,8 +573,18 @@ export default function TokenSaverClient() {
     setSummaryInject(patch.summaryInject);
     if (typeof patch.summaryInjectAboveBytes === "number") setSummaryInjectAboveBytes(patch.summaryInjectAboveBytes);
     if (typeof patch.headroomCompressUserMessages === "boolean") setHeadroomCompressUserMessages(patch.headroomCompressUserMessages);
+    if (typeof patch.pxpipeEnabled === "boolean") setPxpipeEnabled(patch.pxpipeEnabled);
+    if (typeof patch.pxpipeMinChars === "number") setPxpipeMinChars(patch.pxpipeMinChars);
+    if (typeof patch.headroomMinBytes === "number") setHeadroomMinBytes(patch.headroomMinBytes);
+    if (typeof patch.headroomCodeAware === "boolean") setCodeAware(patch.headroomCodeAware);
+    if (typeof patch.headroomKompress === "boolean") setKompress(patch.headroomKompress);
+    // Super-Power: escalate budget action to degrade only when a budget already exists
+    if (saverMode === "ultra" && budgetEnabled) {
+      patch.tokenSaverBudget = { action: "degrade" };
+    }
     await patchSetting(patch);
-    setSaverModeMsg(`Mode "${saverMode}" applied — fine-tune any toggle below.`);
+    setSaverModeConfirm(null);
+    setSaverModeMsg(`Mode "${SAVER_MODE_LABELS[saverMode]}" applied — fine-tune any toggle below.`);
   };
 
   const refreshPxpipeStatus = useCallback(async () => {
@@ -1306,13 +1317,20 @@ export default function TokenSaverClient() {
               >
                 {SAVER_MODES.map((m) => (
                   <option key={m} value={m}>
-                    {m}
+                    {SAVER_MODE_LABELS[m]}
                   </option>
                 ))}
               </select>
-              <Button onClick={handleSaverModeApply}>Apply</Button>
+              <Button onClick={() => setSaverModeConfirm(saverMode)}>
+                Apply
+              </Button>
             </div>
           </div>
+          {SAVER_MODE_DESCRIPTIONS[saverMode] && (
+            <p className="text-sm text-text-muted">
+              {SAVER_MODE_DESCRIPTIONS[saverMode]}
+            </p>
+          )}
           {saverModeMsg && (
             <p className="text-xs text-primary">{saverModeMsg}</p>
           )}
@@ -1780,6 +1798,16 @@ export default function TokenSaverClient() {
         message={extrasConfirm?.message}
         confirmText={extrasConfirm?.confirmText}
         variant={extrasConfirm?.variant}
+      />
+
+      <ConfirmModal
+        isOpen={!!saverModeConfirm}
+        onClose={() => setSaverModeConfirm(null)}
+        onConfirm={handleSaverModeApply}
+        title={`Apply preset "${SAVER_MODE_LABELS[saverModeConfirm] || ""}"?`}
+        message="Semua toggle & threshold token saver akan di-set otomatis ke kombinasi preset ini. Anda tetap bisa fine-tune per toggle setelahnya."
+        confirmText="Apply preset"
+        variant="primary"
       />
     </div>
   );
