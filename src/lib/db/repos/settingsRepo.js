@@ -67,6 +67,15 @@ const DEFAULT_SETTINGS = {
   dropEmptyMessages: false,    // drop empty/whitespace-only messages
   capOutputTokens: false,      // adaptive max_tokens estimate (never touches thinking)
   tokenSaverMode: "off",       // off|lite|full|ultra quick-set presets
+  // Response caching (exact-match, non-stream, in-memory)
+  responseCacheEnabled: false,
+  responseCacheTtlSeconds: 300,
+  responseCacheMaxEntries: 200,
+  // Latency-aware account routing (tiebreak after learning score)
+  latencyAwareRouting: false,
+  // Rate-limit queueing: wait out short 429 cooldowns on the same account
+  rateLimitQueueEnabled: false,
+  rateLimitQueueMaxWaitMs: 10000,
   tokenSaverPlans: [],           // array of {id, modelRegex, format, minPayloadBytes, savers:{rtk,headroom,pxpipe,caveman,ponytail}, budgetTokens, degradeTo}
   tokenSaverBudget: { enabled: false, dailyTokens: 0, warnThresholdPct: 80, action: "warn" }, // warn|degrade|block
   tokenSaverAdvisor: false,      // auto-suggest degrade model on budget

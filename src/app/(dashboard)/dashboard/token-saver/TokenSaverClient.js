@@ -129,6 +129,12 @@ export default function TokenSaverClient() {
   const [dedupImageContent, setDedupImageContent] = useState(false);
   const [dropEmptyMessages, setDropEmptyMessages] = useState(false);
   const [capOutputTokens, setCapOutputTokens] = useState(false);
+  // Routing & caching (response cache, latency routing, rate-limit queue)
+  const [responseCacheEnabled, setResponseCacheEnabled] = useState(false);
+  const [responseCacheTtlSeconds, setResponseCacheTtlSeconds] = useState(300);
+  const [latencyAwareRouting, setLatencyAwareRouting] = useState(false);
+  const [rateLimitQueueEnabled, setRateLimitQueueEnabled] = useState(false);
+  const [rateLimitQueueMaxWaitMs, setRateLimitQueueMaxWaitMs] = useState(10000);
   // Mode preset quick-set (off|lite|full|ultra)
   const [saverMode, setSaverMode] = useState("off");
   const [saverModeMsg, setSaverModeMsg] = useState("");
@@ -590,6 +596,34 @@ export default function TokenSaverClient() {
     patchSetting({ capOutputTokens: value });
   };
 
+  // Routing & caching handlers
+  const handleResponseCacheEnabled = (value) => {
+    setResponseCacheEnabled(value);
+    patchSetting({ responseCacheEnabled: value });
+  };
+
+  const handleResponseCacheTtlBlur = () => {
+    const next = Math.max(0, Number(responseCacheTtlSeconds) || 0);
+    setResponseCacheTtlSeconds(next);
+    patchSetting({ responseCacheTtlSeconds: next });
+  };
+
+  const handleLatencyRoutingEnabled = (value) => {
+    setLatencyAwareRouting(value);
+    patchSetting({ latencyAwareRouting: value });
+  };
+
+  const handleQueueEnabled = (value) => {
+    setRateLimitQueueEnabled(value);
+    patchSetting({ rateLimitQueueEnabled: value });
+  };
+
+  const handleQueueMaxWaitBlur = () => {
+    const next = Math.max(0, Number(rateLimitQueueMaxWaitMs) || 0);
+    setRateLimitQueueMaxWaitMs(next);
+    patchSetting({ rateLimitQueueMaxWaitMs: next });
+  };
+
   const handleSaverModeApply = async () => {
     const patch = applySaverMode(saverMode);
     if (!patch || Object.keys(patch).length === 0) return;
@@ -706,6 +740,12 @@ export default function TokenSaverClient() {
           setDedupImageContent(data.dedupImageContent === true);
           setDropEmptyMessages(data.dropEmptyMessages === true);
           setCapOutputTokens(data.capOutputTokens === true);
+          // Routing & caching
+          setResponseCacheEnabled(data.responseCacheEnabled === true);
+          if (typeof data.responseCacheTtlSeconds === "number") setResponseCacheTtlSeconds(data.responseCacheTtlSeconds);
+          setLatencyAwareRouting(data.latencyAwareRouting === true);
+          setRateLimitQueueEnabled(data.rateLimitQueueEnabled === true);
+          if (typeof data.rateLimitQueueMaxWaitMs === "number") setRateLimitQueueMaxWaitMs(data.rateLimitQueueMaxWaitMs);
           // Auto-plans & budget
           setTokenSaverPlansJson(JSON.stringify(Array.isArray(data.tokenSaverPlans) ? data.tokenSaverPlans : [], null, 2));
           const budget = data.tokenSaverBudget || {};
@@ -1603,6 +1643,82 @@ export default function TokenSaverClient() {
             <Button variant="primary" size="sm" onClick={savePlansAndBudget}>
               {planBudgetSaved ? "Saved" : "Save Plans & Budget"}
             </Button>
+          </div>
+        </div>
+
+        {/* Routing & Caching — response cache, latency routing, rate-limit queue */}
+        <div className="pt-4 mt-4 border-t border-border space-y-4">
+          <p className="font-medium">Routing &amp; Caching</p>
+          <div className="flex items-center justify-between gap-4 flex-wrap">
+            <div className="min-w-0 flex-1">
+              <p className="font-medium">Response caching (exact-match)</p>
+              <p className="text-sm text-text-muted">
+                Identical non-stream requests within the TTL are served from an
+                in-memory cache — no upstream call, no token spend. Only
+                byte-for-byte identical inputs match; streaming never cached.
+              </p>
+            </div>
+            <div className="flex items-center gap-3 shrink-0">
+              {responseCacheEnabled && (
+                <label className="flex items-center gap-1.5 text-xs text-text-muted">
+                  TTL (s)
+                  <Input
+                    type="number"
+                    value={responseCacheTtlSeconds}
+                    onChange={(e) => setResponseCacheTtlSeconds(Number(e.target.value))}
+                    onBlur={handleResponseCacheTtlBlur}
+                    className="w-20"
+                  />
+                </label>
+              )}
+              <Toggle
+                checked={responseCacheEnabled}
+                onChange={() => handleResponseCacheEnabled(!responseCacheEnabled)}
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between gap-4 flex-wrap pt-4 border-t border-border">
+            <div className="min-w-0 flex-1">
+              <p className="font-medium">Latency-aware account routing</p>
+              <p className="text-sm text-text-muted">
+                When accounts tie on learning score, prefer the one with the
+                lowest average response latency
+              </p>
+            </div>
+            <Toggle
+              checked={latencyAwareRouting}
+              onChange={() => handleLatencyRoutingEnabled(!latencyAwareRouting)}
+            />
+          </div>
+
+          <div className="flex items-center justify-between gap-4 flex-wrap pt-4 border-t border-border">
+            <div className="min-w-0 flex-1">
+              <p className="font-medium">Rate-limit queueing</p>
+              <p className="text-sm text-text-muted">
+                On 429 with a short cooldown, wait it out and retry the same
+                account instead of failing over to the next (which may be
+                equally hot). Bounded by max wait.
+              </p>
+            </div>
+            <div className="flex items-center gap-3 shrink-0">
+              {rateLimitQueueEnabled && (
+                <label className="flex items-center gap-1.5 text-xs text-text-muted">
+                  max wait (ms)
+                  <Input
+                    type="number"
+                    value={rateLimitQueueMaxWaitMs}
+                    onChange={(e) => setRateLimitQueueMaxWaitMs(Number(e.target.value))}
+                    onBlur={handleQueueMaxWaitBlur}
+                    className="w-24"
+                  />
+                </label>
+              )}
+              <Toggle
+                checked={rateLimitQueueEnabled}
+                onChange={() => handleQueueEnabled(!rateLimitQueueEnabled)}
+              />
+            </div>
           </div>
         </div>
         {/* PXPIPE hidden from UI — experimental, not exposed to users yet */}

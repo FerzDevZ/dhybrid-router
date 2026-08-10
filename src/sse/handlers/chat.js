@@ -7,6 +7,7 @@ import {
   extractApiKey,
   isValidApiKey,
   recordAccountSuccess,
+  recordAccountLatency,
 } from "../services/auth.js";
 import { getSettings } from "@/lib/localDb";
 import { getUsageTodayTokens } from "@/lib/db/repos/usageRepo.js";
@@ -28,6 +29,9 @@ import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
+import { responseCacheKey, responseCacheGet, responseCacheSet, responseCacheSetMax } from "@/lib/responseCache.js";
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * Handle chat completion request
@@ -252,16 +256,42 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
 
   // Routing shown in the unified "▶" line (client model → provider/model)
 
+  // Exact-match response cache (non-stream only; opt-in via settings)
+  const chatSettings = await getSettings();
+  const cacheEnabled = chatSettings.responseCacheEnabled === true;
+  if (cacheEnabled) {
+    const cacheMax = chatSettings.responseCacheMaxEntries ?? 200;
+    if (Number.isFinite(cacheMax) && cacheMax > 0) responseCacheSetMax(cacheMax);
+  }
+  const cacheKey = cacheEnabled
+    ? responseCacheKey({ endpoint: request?.url ? new URL(request.url).pathname : "", provider, model, body })
+    : null;
+  if (cacheKey) {
+    const cached = responseCacheGet(cacheKey);
+    if (cached?.response) {
+      log.debug("CACHE", `hit ${provider}/${model}`);
+      return new Response(JSON.stringify(cached.response), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "x-9r-cache": "hit",
+          "x-9r-request-id": requestId,
+        },
+      });
+    }
+  }
+
   // Extract userAgent from request
   const userAgent = request?.headers?.get("user-agent") || "";
 
   // Try with available accounts (fallback on errors)
   const excludeConnectionIds = new Set();
+  const queuedConnectionIds = new Set(); // rate-limit queue: at most one wait per account
   let lastError = null;
   let lastStatus = null;
 
   while (true) {
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
+    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, { useLatency: chatSettings.latencyAwareRouting === true });
 
     // All accounts unavailable
     if (!credentials || credentials.allRateLimited) {
@@ -295,7 +325,6 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     }
 
     // Use shared chatCore
-    const chatSettings = await getSettings();
     const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
 
     // Pre-resolve the saver plan once so budget degradation and chatCore stay
@@ -327,6 +356,9 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     } else if (budgetCheck.decision === "warn") {
       log.warn("BUDGET", `near budget: used=${usedTodayTokens} remaining=${budgetCheck.remainingTokens}`);
     }
+
+    // Latency sample for adaptive routing (time to first successful completion)
+    const t0 = Date.now();
 
     const result = await handleChatCore({
       body: { ...body, model: `${provider}/${model}` },
@@ -368,15 +400,44 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       onRequestSuccess: async () => {
         await clearAccountError(credentials.connectionId, credentials, model);
         await recordAccountSuccess(credentials.connectionId);
+        await recordAccountLatency(credentials.connectionId, Date.now() - t0);
       }
     });
 
-    if (result.success) return result.response;
+    if (result.success) {
+      // Exact-match cache store (non-stream only) — cache the raw upstream JSON
+      if (cacheKey && cacheTtlMs > 0) {
+        try {
+          const raw = await result.response.clone().json();
+          if (raw && typeof raw === "object") {
+            responseCacheSet(cacheKey, { response: raw }, cacheTtlMs);
+            const headers = new Headers(result.response.headers);
+            headers.set("x-9r-cache", "miss");
+            return new Response(result.response.body, { status: result.response.status, statusText: result.response.statusText, headers });
+          }
+        } catch { /* non-JSON or already-consumed → skip caching, still return */ }
+      }
+      return result.response;
+    }
 
     // Mark account unavailable (auto-calculates cooldown with exponential backoff, or precise resetsAtMs)
-    const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, result.resetsAtMs);
+    const { shouldFallback, cooldownMs } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, result.resetsAtMs);
 
     if (shouldFallback) {
+      // Rate-limit queue: on 429 with a short cooldown, wait it out and retry
+      // the SAME account once instead of failing over to the next (which may
+      // be equally hot). Bounded by rateLimitQueueMaxWaitMs; never blocks longer.
+      const queueEnabled = chatSettings.rateLimitQueueEnabled === true;
+      const queueMaxWait = chatSettings.rateLimitQueueMaxWaitMs ?? 10000;
+      if (queueEnabled && Number(result.status) === HTTP_STATUS.TOO_MANY_REQUESTS &&
+          cooldownMs > 0 && cooldownMs <= queueMaxWait &&
+          !queuedConnectionIds.has(credentials.connectionId)) {
+        queuedConnectionIds.add(credentials.connectionId);
+        log.warn("QUEUE", `⇢ 429 on ${credentials.connectionName} — waiting ${Math.round(cooldownMs / 1000)}s to retry same account`);
+        await sleep(cooldownMs + 250);
+        await clearAccountError(credentials.connectionId, credentials, model);
+        continue;
+      }
       log.warn("FALLBACK", `⇄ ACC:${credentials.connectionName} UNAVAILABLE (${result.status}) → NEXT ACCOUNT`);
       excludeConnectionIds.add(credentials.connectionId);
       lastError = result.error;

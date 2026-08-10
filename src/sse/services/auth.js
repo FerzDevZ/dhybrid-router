@@ -193,7 +193,8 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     } else {
       // Default: fill-first — adaptive tiebreak: same priority → prefer the
       // account with the best learning score (≥5 samples), then most recent success.
-      connection = await pickByAdaptiveScore(availableConnections);
+      // Latency breaks remaining ties only when latency-aware routing is on.
+      connection = await pickByAdaptiveScore(availableConnections, options?.useLatency === true);
     }
 
     // Per-model pool override (providerSpecificData.modelProxyPools = { modelName: poolId })
@@ -412,7 +413,7 @@ export async function recordAccountFail(connectionId) {
 }
 
 export async function getAccountScore(connectionId) {
-  if (!connectionId) return { score: 0.5, samples: 0, rate: 0.5, lastSuccessAt: 0 };
+  if (!connectionId) return { score: 0.5, samples: 0, rate: 0.5, lastSuccessAt: 0, avgLatency: 0, latencySamples: 0 };
   const cur = (await scoreKv.get(connectionId, null)) || {};
   const samples = (cur.success || 0) + (cur.fail || 0);
   const rate = samples > 0 ? (cur.success || 0) / samples : 0.5;
@@ -421,18 +422,41 @@ export async function getAccountScore(connectionId) {
     samples,
     rate,
     lastSuccessAt: cur.lastSuccessAt || 0,
+    // EWMA-ish simple moving average of recorded latencies (ms)
+    avgLatency: cur.latencySamples ? Math.round((cur.latencyTotal || 0) / cur.latencySamples) : 0,
+    latencySamples: cur.latencySamples || 0,
   };
 }
 
-async function pickByAdaptiveScore(connections) {
+/**
+ * Record a successful request latency (ms) for latency-aware tie-breaking.
+ * Only counts toward accounts with ≥1 success so cold accounts stay neutral.
+ */
+export async function recordAccountLatency(connectionId, latencyMs) {
+  if (!connectionId || connectionId === "noauth") return;
+  if (!Number.isFinite(latencyMs) || latencyMs <= 0) return;
+  const cur = (await scoreKv.get(connectionId, null)) || {};
+  await scoreKv.set(connectionId, {
+    success: cur.success || 0,
+    fail: cur.fail || 0,
+    lastSuccessAt: cur.lastSuccessAt || Date.now(),
+    lastFailAt: cur.lastFailAt || 0,
+    latencyTotal: (cur.latencyTotal || 0) + latencyMs,
+    latencySamples: (cur.latencySamples || 0) + 1,
+  });
+}
+
+async function pickByAdaptiveScore(connections, useLatency = false) {
   const scored = await Promise.all(connections.map(async (c) => ({
     c,
     score: await getAccountScore(c.id),
   })));
-  // Explicit priority wins; learning score is the tiebreak, then recency.
+  // Explicit priority wins; learning score is the tiebreak, then latency
+  // (accounts without latency samples rank last, neutral), then recency.
   scored.sort((a, b) =>
     (a.c.priority ?? 999) - (b.c.priority ?? 999) ||
     b.score.score - a.score.score ||
+    (useLatency ? (a.score.avgLatency || 1e9) - (b.score.avgLatency || 1e9) : 0) ||
     (b.score.lastSuccessAt || 0) - (a.score.lastSuccessAt || 0)
   );
   return scored[0]?.c || connections[0];
