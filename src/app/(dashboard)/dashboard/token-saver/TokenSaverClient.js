@@ -10,6 +10,38 @@ import {
   PONYTAIL_LEVELS,
 } from "../endpoint/endpointConstants";
 
+function StatCard({ title, value, subtitle, icon, color = "primary" }) {
+  const colorClasses = {
+    primary: "text-primary",
+    success: "text-success",
+    warning: "text-warning",
+    error: "text-error",
+    info: "text-info",
+  };
+  const bgClasses = {
+    primary: "bg-primary/10",
+    success: "bg-success/10",
+    warning: "bg-warning/10",
+    error: "bg-error/10",
+    info: "bg-info/10",
+  };
+
+  return (
+    <div className="rounded-lg border border-border p-4">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <p className="text-xs text-text-muted uppercase tracking-wide mb-1">{title}</p>
+          <p className="text-2xl font-bold text-text-main truncate">{value}</p>
+          {subtitle && <p className="text-xs text-text-muted mt-0.5">{subtitle}</p>}
+        </div>
+        <div className={`flex items-center justify-center w-8 h-8 rounded ${bgClasses[color]}`}>
+          <span className={`material-symbols-outlined text-[20px] ${colorClasses[color]}`}>{icon}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function TokenSaverClient() {
   const [rtkEnabled, setRtkEnabledState] = useState(true);
   const [headroomEnabled, setHeadroomEnabled] = useState(false);
@@ -57,29 +89,18 @@ export default function TokenSaverClient() {
   const [showPxpipeModal, setShowPxpipeModal] = useState(false);
   const [pxpipeActionLoading, setPxpipeActionLoading] = useState(false);
   const [pxpipeActionError, setPxpipeActionError] = useState("");
-  const [locale, setLocale] = useState("en");
+  const [locale, setLocale] = useState(() => getCurrentLocale());
+
+  // Token Saver Stats
+  const [tokenSaverStats, setTokenSaverStats] = useState(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [statsError, setStatsError] = useState("");
+  const statsRefreshRef = useRef(null);
+  const timelineCanvasRef = useRef(null);
 
   const { copied, copy } = useCopyToClipboard();
 
-  useEffect(() => {
-    setLocale(getCurrentLocale());
-    return onLocaleChange(() => setLocale(getCurrentLocale()));
-  }, []);
-
-  const isWenyanLocale = WENYAN_LOCALES.includes(locale);
-  const visibleCavemanLevels = isWenyanLocale
-    ? CAVEMAN_LEVELS
-    : CAVEMAN_LEVELS.filter((lvl) => !lvl.wenyan);
-
-  useEffect(() => {
-    const current = CAVEMAN_LEVELS.find((lvl) => lvl.id === cavemanLevel);
-    if (current?.wenyan && !isWenyanLocale) {
-      setCavemanLevel("ultra");
-      patchSetting({ cavemanLevel: "ultra" });
-    }
-  }, [isWenyanLocale, cavemanLevel]);
-
-  const patchSetting = async (patch) => {
+  const patchSetting = useCallback(async (patch) => {
     try {
       await fetch("/api/settings", {
         method: "PATCH",
@@ -89,7 +110,50 @@ export default function TokenSaverClient() {
     } catch (error) {
       console.log("Error updating setting:", error);
     }
-  };
+  }, []);
+
+  const fetchTokenSaverStats = useCallback(async () => {
+    setStatsLoading(true);
+    setStatsError("");
+    try {
+      const res = await fetch("/api/token-saver/stats?timelineDays=30&recentLimit=50");
+      if (res.ok) {
+        const data = await res.json();
+        setTokenSaverStats(data);
+      } else {
+        setStatsError("Failed to load stats");
+      }
+    } catch (e) {
+      setStatsError(e.message);
+    } finally {
+      setStatsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    return onLocaleChange(() => {
+      const newLocale = getCurrentLocale();
+      if (newLocale !== locale) {
+        setLocale(newLocale);
+      }
+    });
+  }, [locale]);
+
+  const isWenyanLocale = WENYAN_LOCALES.includes(locale);
+  const visibleCavemanLevels = isWenyanLocale
+    ? CAVEMAN_LEVELS
+    : CAVEMAN_LEVELS.filter((lvl) => !lvl.wenyan);
+
+  const cavemanLevelHandledRef = useRef(false);
+
+  useEffect(() => {
+    const current = CAVEMAN_LEVELS.find((lvl) => lvl.id === cavemanLevel);
+    if (current?.wenyan && !isWenyanLocale && !cavemanLevelHandledRef.current) {
+      cavemanLevelHandledRef.current = true;
+      setCavemanLevel("ultra");
+      patchSetting({ cavemanLevel: "ultra" });
+    }
+  }, [isWenyanLocale, cavemanLevel, patchSetting]);
 
   const handleRtkEnabled = async (value) => {
     try {
@@ -336,7 +400,7 @@ export default function TokenSaverClient() {
     } finally {
       setRestartingProxy(false);
     }
-  }, [headroomStatus.running, refreshHeadroomStatus]);
+  }, [headroomStatus.running, refreshHeadroomStatus, patchSetting]);
 
   const handleCavemanLevel = (level) => {
     setCavemanLevel(level);
@@ -426,11 +490,137 @@ export default function TokenSaverClient() {
           refreshHeadroomStatus();
           // PRD: run the PXPIPE health check automatically when the page opens
           refreshPxpipeStatus().then(runPxpipeHealth);
+          // Load token saver stats
+          fetchTokenSaverStats();
         }
       } catch {}
     };
     loadSettings();
-  }, [refreshHeadroomStatus, refreshPxpipeStatus, runPxpipeHealth]);
+  }, [refreshHeadroomStatus, refreshPxpipeStatus, runPxpipeHealth, fetchTokenSaverStats]);
+
+  const refreshTokenSaverStats = useCallback(() => {
+    if (statsRefreshRef.current) clearTimeout(statsRefreshRef.current);
+    statsRefreshRef.current = setTimeout(() => {
+      fetchTokenSaverStats();
+    }, 300);
+  }, [fetchTokenSaverStats]);
+
+  // Periodic refresh every 30 seconds
+  useEffect(() => {
+    const interval = setInterval(() => {
+      fetchTokenSaverStats();
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [fetchTokenSaverStats]);
+
+  // Draw timeline chart
+  useEffect(() => {
+    if (!timelineCanvasRef.current || !tokenSaverStats?.timeline) return;
+    const canvas = timelineCanvasRef.current;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+
+    const data = tokenSaverStats.timeline.filter((d) => d.rtk?.compressed > 0 || d.headroom?.compressed > 0 || d.pxpipe?.compressed > 0);
+    if (data.length === 0) return;
+
+    const padding = { top: 20, right: 10, bottom: 30, left: 50 };
+    const chartWidth = rect.width - padding.left - padding.right;
+    const chartHeight = rect.height - padding.top - padding.bottom;
+
+    // Find max tokens saved
+    const maxSaved = Math.max(
+      ...data.map((d) => (d.rtk?.tokensSaved || 0) + (d.headroom?.tokensSaved || 0) + (d.pxpipe?.tokensSavedEst || 0))
+    );
+    if (maxSaved === 0) return;
+
+    const xStep = chartWidth / (data.length - 1 || 1);
+
+    // Draw grid lines
+    ctx.strokeStyle = "rgba(0,0,0,0.05)";
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+      const y = padding.top + (chartHeight / 4) * i;
+      ctx.beginPath();
+      ctx.moveTo(padding.left, y);
+      ctx.lineTo(padding.left + chartWidth, y);
+      ctx.stroke();
+    }
+
+    // Draw Y-axis labels
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    ctx.font = "10px monospace";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    for (let i = 0; i <= 4; i++) {
+      const val = Math.round(maxSaved * (1 - i / 4) / 1024 / 1024 * 100) / 100;
+      const y = padding.top + (chartHeight / 4) * i;
+      ctx.fillText(`${val} MB`, padding.left - 8, y);
+    }
+
+    // Draw datasets
+    const datasets = [
+      { key: "rtk", color: "#10b981", label: "RTK" },
+      { key: "headroom", color: "#3b82f6", label: "Headroom" },
+      { key: "pxpipe", color: "#f59e0b", label: "PXPIPE" },
+    ];
+
+    for (const ds of datasets) {
+      const points = data.map((d, i) => {
+        const val = d[ds.key]?.tokensSaved || d[ds.key]?.tokensSavedEst || 0;
+        const x = padding.left + i * xStep;
+        const y = padding.top + chartHeight - (val / maxSaved) * chartHeight;
+        return { x, y, val };
+      }).filter((p) => p.val > 0);
+
+      if (points.length === 0) continue;
+
+      // Draw area
+      const gradient = ctx.createLinearGradient(0, padding.top, 0, padding.top + chartHeight);
+      gradient.addColorStop(0, ds.color + "33");
+      gradient.addColorStop(1, ds.color + "00");
+
+      ctx.beginPath();
+      ctx.moveTo(points[0].x, padding.top + chartHeight);
+      for (const p of points) ctx.lineTo(p.x, p.y);
+      ctx.lineTo(points[points.length - 1].x, padding.top + chartHeight);
+      ctx.closePath();
+      ctx.fillStyle = gradient;
+      ctx.fill();
+
+      // Draw line
+      ctx.beginPath();
+      ctx.moveTo(points[0].x, points[0].y);
+      for (let i = 1; i < points.length; i++) {
+        const p = points[i];
+        const prev = points[i - 1];
+        const cx = (prev.x + p.x) / 2;
+        ctx.bezierCurveTo(cx, prev.y, cx, p.y, p.x, p.y);
+      }
+      ctx.strokeStyle = ds.color;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+
+    // Draw X-axis labels
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    ctx.font = "10px monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    const labelCount = Math.min(6, data.length);
+    for (let i = 0; i < labelCount; i++) {
+      const idx = Math.round(i * (data.length - 1) / (labelCount - 1));
+      const d = data[idx];
+      const x = padding.left + idx * xStep;
+      ctx.fillText(d.date.slice(5), x, padding.top + chartHeight + 4);
+    }
+  }, [tokenSaverStats]);
 
   const headroomRunning = !!headroomStatus.running;
   const headroomStatusLabel = headroomStatus.loading
@@ -466,6 +656,73 @@ export default function TokenSaverClient() {
 
   return (
     <div className="space-y-6 p-6">
+      {/* Token Saver Stats Dashboard */}
+      <Card>
+        <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+          <span className="material-symbols-outlined text-primary">analytics</span>
+          Token Savings Stats
+        </h3>
+        {statsLoading ? (
+          <div className="flex items-center justify-center py-8">
+            <span className="material-symbols-outlined animate-spin text-[24px] text-primary">progress_activity</span>
+          </div>
+        ) : statsError ? (
+          <p className="text-sm text-error">{statsError}</p>
+        ) : tokenSaverStats ? (
+          <>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
+              <StatCard
+                title="Total Requests"
+                value={tokenSaverStats.windows.all.requests.toLocaleString()}
+                icon="tune"
+              />
+              <StatCard
+                title="RTK Saved"
+                value={`${(tokenSaverStats.windows.all.rtk.tokensSaved / 1024 / 1024).toFixed(2)} MB`}
+                subtitle={`${tokenSaverStats.windows.all.rtk.savedPct}%`}
+                icon="compress"
+                color="success"
+              />
+              <StatCard
+                title="Headroom Saved"
+                value={`${(tokenSaverStats.windows.all.headroom.tokensSaved / 1024 / 1024).toFixed(2)} MB`}
+                subtitle={`${tokenSaverStats.windows.all.headroom.savedPct}%`}
+                icon="memory"
+                color="primary"
+              />
+              <StatCard
+                title="PXPIPE Saved"
+                value={`${(tokenSaverStats.windows.all.pxpipe.tokensSavedEst / 1024 / 1024).toFixed(2)} MB`}
+                subtitle={`${tokenSaverStats.windows.all.pxpipe.savedPct}% • ${tokenSaverStats.windows.all.pxpipe.imagesGenerated} imgs`}
+                icon="image"
+                color="warning"
+              />
+              <StatCard
+                title="Caveman + Ponytail"
+                value={`${tokenSaverStats.windows.all.caveman.applied + tokenSaverStats.windows.all.ponytail.applied} / ${tokenSaverStats.windows.all.requests}`}
+                subtitle={`${Math.round(((tokenSaverStats.windows.all.caveman.applied + tokenSaverStats.windows.all.ponytail.applied) / Math.max(1, tokenSaverStats.windows.all.requests)) * 100)}% applied`}
+                icon="psychology"
+                color="info"
+              />
+            </div>
+
+            {/* Timeline Chart */}
+            <div className="border-t border-border pt-6">
+              <h4 className="font-medium text-sm mb-3">Tokens Saved (Last 30 Days)</h4>
+              <div className="h-48 relative">
+                <canvas
+                  ref={timelineCanvasRef}
+                  className="w-full h-full"
+                  style={{ maxWidth: "100%" }}
+                />
+              </div>
+            </div>
+          </>
+        ) : (
+          <p className="text-sm text-text-muted">No stats available yet. Make some requests with token savers enabled.</p>
+        )}
+      </Card>
+
       <Card id="rtk">
         <div className="flex items-center justify-between mb-2">
           <h2 className="text-lg font-semibold flex items-center gap-2">

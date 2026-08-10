@@ -12,6 +12,7 @@ import { createErrorResult, parseUpstreamError, formatProviderError } from "../u
 import { HTTP_STATUS, TOKEN_SAVER_HEADER } from "../config/runtimeConfig.js";
 import { handleBypassRequest } from "../utils/bypassHandler.js";
 import { trackPendingRequest, appendRequestLog, saveRequestDetail, saveRequestUsage } from "@/lib/usageDb.js";
+import { appendTokenSaverEvent } from "@/lib/tokenSaver/events.js";
 import { getExecutor } from "../executors/index.js";
 import { supportsGrokCliReasoningEffort } from "../config/grokCli.js";
 import { buildRequestDetail, extractRequestConfig } from "./chatCore/requestDetail.js";
@@ -262,7 +263,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   // PXPIPE: image bulky context (Claude-format bodies only), last saver before dispatch
   let pxpipeSummary = null;
-  if (pxpipeEnabled) {
+  // Respect the per-request X-9Router-Token-Saver: off header (same gate as RTK/Headroom/Caveman/Ponytail)
+  if (pxpipeEnabled && tokenSaverEnabled) {
     const pxpipeResult = await compressWithPxpipe(translatedBody, {
       enabled: true, format: finalFormat, model: upstreamModel,
       minChars: pxpipeMinChars, timeoutMs: pxpipeTimeoutMs, transform: pxpipeTransform,
@@ -274,6 +276,19 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
 
   if (xf.length && log?.line) log.line(reqTag, "⚙", xf.join(" · "));
+
+  // Emit token saver stats event (fire-and-forget, must not break requests)
+  try {
+    appendTokenSaverEvent({
+      provider,
+      model: upstreamModel,
+      rtk: rtkStats,
+      headroom: headroomStats,
+      pxpipe: pxpipeSummary,
+      caveman: tokenSaverEnabled && cavemanEnabled && cavemanLevel ? { applied: true, level: cavemanLevel } : { applied: false },
+      ponytail: tokenSaverEnabled && ponytailEnabled && ponytailLevel ? { applied: true, level: ponytailLevel } : { applied: false },
+    });
+  } catch { /* stats must not break requests */ }
 
   const executor = getExecutor(provider);
   trackPendingRequest(model, provider, connectionId, true);

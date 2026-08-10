@@ -117,13 +117,76 @@ function compressKiroFormat(body, enabled) {
   return stats;
 }
 
+// Cross-request LRU cache for compressed tool output
+// Key: SHA-256 hash of input text, Value: compressed output
+const compressionCache = new Map();
+const CACHE_MAX_ENTRIES = 100;
+const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const CACHE_MAX_INPUT_BYTES = 1024 * 1024; // 1 MB
+
+function cacheGet(key) {
+  const entry = compressionCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.ts > CACHE_TTL_MS) {
+    compressionCache.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+
+function cacheSet(key, value) {
+  // Evict oldest if over cap
+  if (compressionCache.size >= CACHE_MAX_ENTRIES) {
+    const firstKey = compressionCache.keys().next().value;
+    compressionCache.delete(firstKey);
+  }
+  compressionCache.set(key, { value, ts: Date.now() });
+}
+
+function hashText(text) {
+  // Quick hash for cache key
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) {
+    hash = ((hash << 5) - hash) + text.charCodeAt(i);
+    hash |= 0;
+  }
+  return hash.toString(36);
+}
+
 function compressText(text, stats, shape) {
-  const bytesIn = text.length;
+  // Use UTF-8 byte length for accurate savings %
+  const bytesIn = Buffer.byteLength(text, "utf8");
   stats.bytesBefore += bytesIn;
 
   if (bytesIn < MIN_COMPRESS_SIZE || bytesIn > RAW_CAP) {
     stats.bytesAfter += bytesIn;
     return text;
+  }
+
+  // Skip cache for large inputs (avoid memory pressure)
+  if (bytesIn > CACHE_MAX_INPUT_BYTES) {
+    const fn = autoDetectFilter(text);
+    if (!fn) {
+      stats.bytesAfter += bytesIn;
+      return text;
+    }
+    const out = safeApply(fn, text);
+    if (!out || out.length === 0 || out.length >= bytesIn) {
+      stats.bytesAfter += bytesIn;
+      return text;
+    }
+    stats.bytesAfter += Buffer.byteLength(out, "utf8");
+    stats.hits.push({ shape, filter: fn.filterName || fn.name, saved: bytesIn - Buffer.byteLength(out, "utf8") });
+    return out;
+  }
+
+  // Cross-request caching
+  const cacheKey = hashText(text);
+  const cached = cacheGet(cacheKey);
+  if (cached) {
+    stats.bytesAfter += Buffer.byteLength(cached, "utf8");
+    stats.hits.push({ shape, filter: "cached", saved: bytesIn - Buffer.byteLength(cached, "utf8") });
+    return cached;
   }
 
   const fn = autoDetectFilter(text);
@@ -135,13 +198,17 @@ function compressText(text, stats, shape) {
   const out = safeApply(fn, text);
 
   // Safety: never return empty, never grow the input
-  if (!out || out.length === 0 || out.length >= bytesIn) {
+  if (!out || out.length === 0 || Buffer.byteLength(out, "utf8") >= bytesIn) {
     stats.bytesAfter += bytesIn;
     return text;
   }
 
-  stats.bytesAfter += out.length;
-  stats.hits.push({ shape, filter: fn.filterName || fn.name, saved: bytesIn - out.length });
+  const bytesOut = Buffer.byteLength(out, "utf8");
+  stats.bytesAfter += bytesOut;
+  stats.hits.push({ shape, filter: fn.filterName || fn.name, saved: bytesIn - bytesOut });
+
+  // Cache the result
+  cacheSet(cacheKey, out);
   return out;
 }
 

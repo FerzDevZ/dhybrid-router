@@ -4,6 +4,7 @@ import {
   openaiResponsesToOpenAIRequest,
   openaiToOpenAIResponsesRequest,
 } from "../translator/request/openai-responses.js";
+import { FORMATS } from "../translator/formats.js";
 
 const DEFAULT_TIMEOUT_MS = 3000;
 
@@ -257,7 +258,7 @@ export async function compressWithHeadroom(body, { enabled, url, model, format, 
     if (diagnostics) diagnostics.before = captureSizeSnapshot(body);
 
     // Claude shape: translate → OpenAI → compress → translate back.
-    if (format === "claude") {
+  if (format === FORMATS.CLAUDE) {
       const oai = claudeToOpenAIRequest(model, body, false);
       if (!Array.isArray(oai?.messages)) {
         setDiagnostic(diagnostics, "Claude request did not translate to messages[]");
@@ -273,9 +274,9 @@ export async function compressWithHeadroom(body, { enabled, url, model, format, 
     }
 
     // OpenAI Responses shape (Codex): body.input holds Responses items, NOT OpenAI
-    // messages. Translate input -> OpenAI -> compress -> translate back to input so
-    // body.input keeps the Responses contract (the proxy only understands OpenAI). (#1998)
-    if (format === "openai-responses") {
+  // messages. Translate input -> OpenAI -> compress -> translate back to input so
+  // body.input keeps the Responses contract (the proxy only understands OpenAI). (#1998)
+  if (format === FORMATS.OPENAI_RESPONSES) {
       if (hasUnsafeResponsesInputForCompression(body)) {
         setDiagnostic(diagnostics, "skipped: openai-responses tool/reasoning input is not safe to compress");
         return null;
@@ -297,9 +298,9 @@ export async function compressWithHeadroom(body, { enabled, url, model, format, 
     }
 
     // Kiro shape: conversationState.history/currentMessage are projected to
-    // OpenAI messages for the proxy, then copied back into the original Kiro
-    // fields. Keep the provider payload shape intact for Kiro's executor.
-    if (format === "kiro") {
+  // OpenAI messages for the proxy, then copied back into the original Kiro
+  // fields. Keep the provider payload shape intact for Kiro's executor.
+  if (format === FORMATS.KIRO) {
       const projection = collectKiroHeadroomMessages(body);
       if (!projection) {
         setDiagnostic(diagnostics, "Kiro request did not project to messages[]");
