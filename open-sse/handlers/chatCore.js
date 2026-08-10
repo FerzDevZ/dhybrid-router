@@ -25,6 +25,7 @@ import { dedupeTools } from "../utils/toolDeduper.js";
 import { injectCaveman } from "../rtk/caveman.js";
 import { injectPonytail } from "../rtk/ponytail.js";
 import { compressMessages, formatRtkLog } from "../rtk/index.js";
+import { dedupMessages, injectConversationSummary, trimHistory } from "../rtk/trimming.js";
 import { compressWithHeadroom, formatHeadroomLog, formatHeadroomSizeLog, isHeadroomPhantomSavings } from "../rtk/headroom.js";
 import { compressWithPxpipe } from "../rtk/pxpipe.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
@@ -254,6 +255,10 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   let cavemanEnabledEff = planSavers ? !!planSavers.caveman : cavemanEnabled;
   let ponytailEnabledEff = planSavers ? !!planSavers.ponytail : ponytailEnabled;
   const pxpipeEnabledEff = planSavers ? !!planSavers.pxpipe : pxpipeEnabled;
+  // New savers: dedup, history trim, heuristic summary (thresholds from settings).
+  const dedupEff = planSavers ? !!planSavers.dedupMessages : settings?.dedupMessages === true;
+  const historyTrimEff = planSavers ? !!planSavers.historyTrim : (settings?.historyTrimMaxBytes ?? 0) > 0;
+  const summaryEff = planSavers ? !!planSavers.summaryInject : settings?.summaryInject === true;
   // Plan-level per-request token budget: when the request exceeds it, force the
   // aggressive savers on instead of blocking (recorded as plan-over-budget).
   const planBudget = enforcePlanBudget(saverPlan, translatedBody);
@@ -288,6 +293,34 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   // Token-saver flags accumulator for the single "⚙" log line below.
   const xf = [];
+
+  // Dedup: drop consecutive identical messages (repeated tool_result/prompts).
+  const trimmingStats = {};
+  if (tokenSaverEnabled && dedupEff) {
+    const dedupStats = dedupMessages(translatedBody);
+    if (dedupStats) {
+      trimmingStats.dedup = dedupStats;
+      xf.push(`DEDUP:${dedupStats.removed}`);
+    }
+  }
+
+  // Summary & trim are mutually exclusive per request: summary wins when it
+  // kicks in (payload above its threshold), otherwise sliding-window trim.
+  if (tokenSaverEnabled) {
+    if (summaryEff) {
+      const summaryStats = injectConversationSummary(translatedBody, settings?.summaryInjectAboveBytes ?? 90000);
+      if (summaryStats) {
+        trimmingStats.summary = summaryStats;
+        xf.push(`SUMMARY:${summaryStats.removed}msgs`);
+      }
+    } else if (historyTrimEff) {
+      const trimStats = trimHistory(translatedBody, settings?.historyTrimMaxBytes ?? 0, settings?.historyTrimKeepMin ?? 6);
+      if (trimStats) {
+        trimmingStats.trim = trimStats;
+        xf.push(`TRIM:-${trimStats.removed}msgs`);
+      }
+    }
+  }
 
   // Caveman: inject terse-style system prompt
   if (tokenSaverEnabled && cavemanEnabledEff && cavemanLevel) {
@@ -327,6 +360,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       pxpipe: pxpipeSummary,
       caveman: tokenSaverEnabled && cavemanEnabledEff && cavemanLevel ? { applied: true, level: cavemanLevel } : { applied: false },
       ponytail: tokenSaverEnabled && ponytailEnabledEff && ponytailLevel ? { applied: true, level: ponytailLevel } : { applied: false },
+      dedup: trimmingStats.dedup || null,
+      trim: trimmingStats.trim || null,
+      summary: trimmingStats.summary || null,
       planId: saverPlan.planId,
       planReason: saverPlan.reason,
       budgetDecision: budgetDecision || null,

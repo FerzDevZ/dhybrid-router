@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Card, Button, Input, Modal, Toggle, ConfirmModal } from "@/shared/components";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { getCurrentLocale, onLocaleChange } from "@/i18n/runtime";
+import { applySaverMode, detectSaverMode, SAVER_MODES } from "@/lib/tokenSaver/mode";
 import {
   WENYAN_LOCALES,
   CAVEMAN_LEVELS,
@@ -116,6 +117,16 @@ export default function TokenSaverClient() {
   const [ponytailLevel, setPonytailLevel] = useState("full");
   const [pxpipeEnabled, setPxpipeEnabled] = useState(false);
   const [pxpipeMinChars, setPxpipeMinChars] = useState(25000);
+  // Trim savers: dedup + history trim + heuristic summary (all off by default)
+  const [dedupMessages, setDedupMessages] = useState(false);
+  const [historyTrimMaxBytes, setHistoryTrimMaxBytes] = useState(0);
+  const [historyTrimKeepMin, setHistoryTrimKeepMin] = useState(6);
+  const [summaryInject, setSummaryInject] = useState(false);
+  const [summaryInjectAboveBytes, setSummaryInjectAboveBytes] = useState(90000);
+  const [headroomCompressUserMessages, setHeadroomCompressUserMessages] = useState(false);
+  // Mode preset quick-set (off|lite|full|ultra)
+  const [saverMode, setSaverMode] = useState("off");
+  const [saverModeMsg, setSaverModeMsg] = useState("");
   const [pxpipeStatus, setPxpipeStatus] = useState({
     installed: false,
     installing: false,
@@ -512,6 +523,59 @@ export default function TokenSaverClient() {
     patchSetting({ ponytailLevel: level });
   };
 
+  // Trim savers + mode preset handlers
+  const handleDedupEnabled = (value) => {
+    setDedupMessages(value);
+    patchSetting({ dedupMessages: value });
+  };
+
+  const handleHistoryTrimEnabled = (value) => {
+    setHistoryTrimMaxBytes(value ? 45000 : 0);
+    patchSetting({ historyTrimMaxBytes: value ? 45000 : 0 });
+  };
+
+  const handleHistoryTrimBytesBlur = () => {
+    const next = Math.max(0, Number(historyTrimMaxBytes) || 0);
+    setHistoryTrimMaxBytes(next);
+    patchSetting({ historyTrimMaxBytes: next });
+  };
+
+  const handleHistoryTrimKeepBlur = () => {
+    const next = Math.max(1, Number(historyTrimKeepMin) || 6);
+    setHistoryTrimKeepMin(next);
+    patchSetting({ historyTrimKeepMin: next });
+  };
+
+  const handleSummaryEnabled = (value) => {
+    setSummaryInject(value);
+    patchSetting({ summaryInject: value });
+  };
+
+  const handleSummaryAboveBlur = () => {
+    const next = Math.max(0, Number(summaryInjectAboveBytes) || 90000);
+    setSummaryInjectAboveBytes(next);
+    patchSetting({ summaryInjectAboveBytes: next });
+  };
+
+  const handleSaverModeApply = async () => {
+    const patch = applySaverMode(saverMode);
+    if (!patch || Object.keys(patch).length === 0) return;
+    setRtkEnabledState(patch.rtkEnabled);
+    setHeadroomEnabled(patch.headroomEnabled);
+    setCavemanEnabled(patch.cavemanEnabled);
+    if (patch.cavemanLevel) setCavemanLevel(patch.cavemanLevel);
+    setPonytailEnabled(patch.ponytailEnabled);
+    if (patch.ponytailLevel) setPonytailLevel(patch.ponytailLevel);
+    setDedupMessages(patch.dedupMessages);
+    if (typeof patch.historyTrimMaxBytes === "number") setHistoryTrimMaxBytes(patch.historyTrimMaxBytes);
+    if (typeof patch.historyTrimKeepMin === "number") setHistoryTrimKeepMin(patch.historyTrimKeepMin);
+    setSummaryInject(patch.summaryInject);
+    if (typeof patch.summaryInjectAboveBytes === "number") setSummaryInjectAboveBytes(patch.summaryInjectAboveBytes);
+    if (typeof patch.headroomCompressUserMessages === "boolean") setHeadroomCompressUserMessages(patch.headroomCompressUserMessages);
+    await patchSetting(patch);
+    setSaverModeMsg(`Mode "${saverMode}" applied — fine-tune any toggle below.`);
+  };
+
   const refreshPxpipeStatus = useCallback(async () => {
     setPxpipeStatus((s) => ({ ...s, loading: true }));
     try {
@@ -583,6 +647,13 @@ export default function TokenSaverClient() {
           setPonytailLevel(data.ponytailLevel || "full");
           setPxpipeEnabled(!!data.pxpipeEnabled);
           if (typeof data.pxpipeMinChars === "number") setPxpipeMinChars(data.pxpipeMinChars);
+          // Trim savers + mode preset
+          setDedupMessages(data.dedupMessages === true);
+          if (typeof data.historyTrimMaxBytes === "number") setHistoryTrimMaxBytes(data.historyTrimMaxBytes);
+          if (typeof data.historyTrimKeepMin === "number") setHistoryTrimKeepMin(data.historyTrimKeepMin);
+          setSummaryInject(data.summaryInject === true);
+          if (typeof data.summaryInjectAboveBytes === "number") setSummaryInjectAboveBytes(data.summaryInjectAboveBytes);
+          setHeadroomCompressUserMessages(data.headroomCompressUserMessages === true);
           // Auto-plans & budget
           setTokenSaverPlansJson(JSON.stringify(Array.isArray(data.tokenSaverPlans) ? data.tokenSaverPlans : [], null, 2));
           const budget = data.tokenSaverBudget || {};
@@ -762,6 +833,21 @@ export default function TokenSaverClient() {
     pxpipeHealthy || pxpipeStatus.running
       ? "bg-success/15 text-success"
       : "bg-warning/15 text-warning";
+
+  const activeSaverMode = detectSaverMode({
+    rtkEnabled,
+    headroomEnabled,
+    cavemanEnabled,
+    cavemanLevel,
+    ponytailEnabled,
+    ponytailLevel,
+    dedupMessages,
+    historyTrimMaxBytes,
+    historyTrimKeepMin,
+    summaryInject,
+    summaryInjectAboveBytes,
+    headroomCompressUserMessages,
+  });
 
   return (
     <div className="space-y-6 p-6">
@@ -1195,6 +1281,126 @@ export default function TokenSaverClient() {
             />
           </div>
         </div>
+        {/* Mode preset + trim savers (dedup / history trim / summary) */}
+        <div className="pt-4 mt-4 border-t border-border space-y-4">
+          <div className="flex items-center justify-between gap-4 flex-wrap">
+            <div className="min-w-0 flex-1">
+              <p className="font-medium">
+                Mode Preset{" "}
+                <span className="ml-2 text-xs font-normal px-2 py-0.5 rounded bg-surface-2 text-text-muted">
+                  active: {activeSaverMode}
+                </span>
+              </p>
+              <p className="text-sm text-text-muted">
+                One-click quick-set for all savers: <b>off</b> (nothing),
+                <b> lite</b> (RTK + dedup), <b>full</b> (RTK + Headroom +
+                Ponytail + dedup + trim + summary), <b>ultra</b> (everything,
+                most aggressive). Fine-tune any toggle below afterwards.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <select
+                value={saverMode}
+                onChange={(e) => setSaverMode(e.target.value)}
+                className="rounded border border-border bg-surface-1 px-3 py-1.5 text-sm text-text-main"
+              >
+                {SAVER_MODES.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+              <Button onClick={handleSaverModeApply}>Apply</Button>
+            </div>
+          </div>
+          {saverModeMsg && (
+            <p className="text-xs text-primary">{saverModeMsg}</p>
+          )}
+
+          <div className="flex items-center justify-between gap-4 flex-wrap pt-4 border-t border-border">
+            <div className="min-w-0 flex-1">
+              <p className="font-medium">Dedup pesan duplikat</p>
+              <p className="text-sm text-text-muted">
+                Drop consecutive identical messages (repeated tool_result /
+                repeated prompts) before sending
+              </p>
+            </div>
+            <Toggle
+              checked={dedupMessages}
+              onChange={() => handleDedupEnabled(!dedupMessages)}
+            />
+          </div>
+
+          <div className="flex items-center justify-between gap-4 flex-wrap pt-4 border-t border-border">
+            <div className="min-w-0 flex-1">
+              <p className="font-medium">History trim (sliding window)</p>
+              <p className="text-sm text-text-muted">
+                Drop oldest messages when the payload exceeds the byte cap
+                (always keeps system + last N messages). 0 = off
+              </p>
+            </div>
+            <div className="flex items-center gap-3 shrink-0">
+              {historyTrimMaxBytes > 0 && (
+                <>
+                  <label className="flex items-center gap-1.5 text-xs text-text-muted">
+                    max bytes
+                    <Input
+                      type="number"
+                      value={historyTrimMaxBytes}
+                      onChange={(e) => setHistoryTrimMaxBytes(Number(e.target.value))}
+                      onBlur={handleHistoryTrimBytesBlur}
+                      className="w-24"
+                    />
+                  </label>
+                  <label className="flex items-center gap-1.5 text-xs text-text-muted">
+                    keep last
+                    <Input
+                      type="number"
+                      min={1}
+                      value={historyTrimKeepMin}
+                      onChange={(e) => setHistoryTrimKeepMin(Number(e.target.value))}
+                      onBlur={handleHistoryTrimKeepBlur}
+                      className="w-16"
+                    />
+                  </label>
+                </>
+              )}
+              <Toggle
+                checked={historyTrimMaxBytes > 0}
+                onChange={() => handleHistoryTrimEnabled(historyTrimMaxBytes <= 0)}
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between gap-4 flex-wrap pt-4 border-t border-border">
+            <div className="min-w-0 flex-1">
+              <p className="font-medium">Summary ringkas percakapan</p>
+              <p className="text-sm text-text-muted">
+                Collapse middle history into one heuristic system summary when
+                the payload exceeds the threshold (no LLM call — deterministic)
+              </p>
+            </div>
+            <div className="flex items-center gap-3 shrink-0">
+              {summaryInject && (
+                <label className="flex items-center gap-1.5 text-xs text-text-muted">
+                  above bytes
+                  <Input
+                    type="number"
+                    value={summaryInjectAboveBytes}
+                    onChange={(e) => setSummaryInjectAboveBytes(Number(e.target.value))}
+                    onBlur={handleSummaryAboveBlur}
+                    className="w-24"
+                  />
+                </label>
+              )}
+              <Toggle
+                checked={summaryInject}
+                onChange={() => handleSummaryEnabled(!summaryInject)}
+              />
+            </div>
+          </div>
+        </div>
+
         {/* Auto-Plans & Budget — context-aware saver overrides + daily token budget */}
         <div className="pt-4 mt-4 border-t border-border space-y-4">
           <div className="flex items-start justify-between gap-4 flex-wrap">
