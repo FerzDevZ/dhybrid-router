@@ -1,14 +1,16 @@
 import { NextResponse } from "next/server";
 import { getApiKeys, createApiKey } from "@/lib/localDb";
 import { getConsistentMachineId } from "@/shared/utils/machineId";
+import { maskKey } from "@/lib/maskKey";
 
 export const dynamic = "force-dynamic";
 
-// GET /api/keys - List API keys
+// GET /api/keys - List API keys (masked; full key only returned at creation)
 export async function GET() {
   try {
     const keys = await getApiKeys();
-    return NextResponse.json({ keys });
+    const masked = keys.map((k) => ({ ...k, key: maskKey(k.key) }));
+    return NextResponse.json({ keys: masked });
   } catch (error) {
     console.log("Error fetching keys:", error);
     return NextResponse.json({ error: "Failed to fetch keys" }, { status: 500 });

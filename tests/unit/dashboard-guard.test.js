@@ -62,8 +62,10 @@ describe("dashboard guard public LLM API access", () => {
   });
 
   it("rejects remote Host-spoof when real peer IP is non-loopback", async () => {
+    // custom-server.js stamps x-9r-custom-server on every proxied request
     const response = await proxy(request("/v1/chat/completions", {
       host: "localhost",
+      "x-9r-custom-server": "1",
       "x-9r-real-ip": "10.204.111.34",
     }));
 

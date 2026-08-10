@@ -34,10 +34,15 @@ import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 export async function handleChat(request, clientRawRequest = null) {
   // Tracing: expose a per-request id on every response (success or error)
   const requestId = `req_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-  const res = await handleChatInner(request, clientRawRequest, requestId);
-  const headers = new Headers(res.headers);
-  if (!headers.has("x-9r-request-id")) headers.set("x-9r-request-id", requestId);
-  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+  try {
+    const res = await handleChatInner(request, clientRawRequest, requestId);
+    const headers = new Headers(res.headers);
+    if (!headers.has("x-9r-request-id")) headers.set("x-9r-request-id", requestId);
+    return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+  } catch (err) {
+    log.error("CHAT", "Unhandled error in handleChat", err);
+    return errorResponse(HTTP_STATUS.INTERNAL_SERVER_ERROR, err?.message || "Internal server error", requestId);
+  }
 }
 
 async function handleChatInner(request, clientRawRequest = null, requestId = null) {

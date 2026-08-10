@@ -10,6 +10,7 @@ import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import { AI_PROVIDERS } from "@/shared/constants/providers";
 import { handleComboChat } from "open-sse/services/combo.js";
 import * as log from "../utils/logger.js";
+import { checkApiLimits, rateLimitResponse } from "@/lib/rateLimit";
 
 // Derived from providers.js: any TTS provider not noAuth requires stored credentials
 const CREDENTIALED_PROVIDERS = new Set(
@@ -39,6 +40,18 @@ export async function handleTts(request) {
     if (!apiKey) return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Missing API key");
     const valid = await isValidApiKey(apiKey);
     if (!valid) return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key");
+  }
+
+  // Rate limit + daily quota (same gate as chat)
+  if (settings.requireApiKey) {
+    const apiKey = extractApiKey(request);
+    if (apiKey) {
+      const { allow, reason, status, retryAfter, retryAfterHuman } = await checkApiLimits(apiKey, settings);
+      if (!allow) {
+        log.warn("RATE", `Limit hit: ${reason} (retry ${retryAfterHuman})`);
+        return rateLimitResponse(reason, retryAfter, status);
+      }
+    }
   }
 
   if (!modelStr) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model");

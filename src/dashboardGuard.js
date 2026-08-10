@@ -20,6 +20,7 @@ async function hasValidCliToken(request) {
 
 // Public API paths — no auth required (LLM API has its own key auth inside handler).
 const PUBLIC_API_PATHS = [
+  "/api/healthz",
   "/api/health",
   "/api/init",
   "/api/locale",
@@ -59,7 +60,6 @@ const PROTECTED_API_PATHS = [
   "/api/media-providers",
   "/api/pricing",
   "/api/tags",
-  "/api/cli-tools",
   "/api/mcp",
   "/api/translator",
   "/api/tunnel",
@@ -68,6 +68,7 @@ const PROTECTED_API_PATHS = [
 // Routes that spawn child processes or read host secrets — restrict to localhost.
 const LOCAL_ONLY_PATHS = [
   "/api/cli-tools/cowork-settings",
+  "/api/cli-tools/claude-settings",
   "/api/cli-tools/antigravity-mitm",
   "/api/mcp/",
   "/api/tunnel/tailscale-install",
@@ -96,10 +97,16 @@ export function isLocalRequest(request) {
   // Stamped by custom-server.js when forwarding headers exist: request came through
   // a reverse proxy, so the loopback socket is the proxy hop, not the end-user.
   if (request.headers.get("x-9r-via-proxy")) return false;
-  // Trusted peer IP from TCP socket (custom-server.js); unspoofable. Primary anchor for "local".
-  const realIp = request.headers.get("x-9r-real-ip");
-  if (realIp) {
-    if (!isLoopbackHostname(realIp)) return false;
+  // Trusted peer IP from TCP socket (custom-server.js); unspoofable. Only trusted
+  // with the custom-server stamp so bare `next start` cannot spoof it.
+  if (request.headers.get("x-9r-custom-server") === "1") {
+    const realIp = request.headers.get("x-9r-real-ip");
+    if (realIp) {
+      if (!isLoopbackHostname(realIp)) return false;
+    } else if (!isLoopbackHostname(request.headers.get("host"))) {
+      // Fallback for bare server.js (dev) without custom-server: legacy Host-based check.
+      return false;
+    }
   } else if (!isLoopbackHostname(request.headers.get("host"))) {
     // Fallback for bare server.js (dev) without custom-server: legacy Host-based check.
     return false;

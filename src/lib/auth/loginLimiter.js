@@ -46,9 +46,12 @@ export function recordSuccess(ip) {
 }
 
 export function getClientIp(request) {
-  // Trusted: set from TCP socket by custom-server.js (client cannot spoof).
-  const realIp = request.headers.get("x-9r-real-ip");
-  if (realIp) return realIp;
+  // Only trust x-9r-real-ip when custom-server.js stamped it (proves it came
+  // from the TCP socket, not a spoofed header on bare `next start`/dev).
+  if (request.headers.get("x-9r-custom-server") === "1") {
+    const realIp = request.headers.get("x-9r-real-ip");
+    if (realIp) return realIp;
+  }
   // Behind a trusted reverse proxy that overwrites XFF with the real client IP.
   if (process.env.TRUST_PROXY === "true") {
     const xff = request.headers.get("x-forwarded-for");

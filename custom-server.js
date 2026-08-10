@@ -24,7 +24,11 @@ http.createServer = (...args) => {
     delete req.headers["x-9r-real-ip"];
     delete req.headers["x-forwarded-for"];
     delete req.headers["x-9r-via-proxy"];
+    delete req.headers["x-9r-custom-server"];
     req.headers["x-9r-real-ip"] = ip;
+    // Unconditional stamp: proves x-9r-real-ip came from the TCP socket here,
+    // so middleware/limiter can reject spoofed copies on bare next start.
+    req.headers["x-9r-custom-server"] = "1";
     if (viaProxy) req.headers["x-9r-via-proxy"] = "1";
     return handler(req, res);
   };

@@ -104,9 +104,16 @@ export async function GET() {
     const has9Router = !!(settings?.env?.ANTHROPIC_BASE_URL);
     const claudeJson = await readClaudeJson();
 
+    // Strip live credentials before returning (ANTHROPIC_AUTH_TOKEN).
+    let safeSettings = settings;
+    if (settings?.env) {
+      safeSettings = { ...settings, env: { ...settings.env } };
+      delete safeSettings.env.ANTHROPIC_AUTH_TOKEN;
+    }
+
     return NextResponse.json({
       installed: true,
-      settings: settings,
+      settings: safeSettings,
       has9Router: has9Router,
       exaMcpEnabled: !!claudeJson?.mcpServers?.exa,
       settingsPath: getClaudeSettingsPath(),

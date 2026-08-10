@@ -78,6 +78,9 @@ export async function getModelInfo(modelStr) {
   return getModelInfoCore(modelStr, getModelAliases);
 }
 
+import { getComboModelsFromData } from "open-sse/services/combo.js";
+import { getCombos } from "@/lib/localDb";
+
 /**
  * Check if model is a combo and get models list
  * @returns {Promise<string[]|null>} Array of models or null if not a combo
@@ -86,9 +89,6 @@ export async function getComboModels(modelStr) {
   // Only check if it's not in provider/model format
   if (modelStr.includes("/")) return null;
 
-  const combo = await getComboByName(modelStr);
-  if (combo && combo.models && combo.models.length > 0) {
-    return combo.models;
-  }
-  return null;
+  const combos = await getCombos();
+  return getComboModelsFromData(modelStr, combos);
 }

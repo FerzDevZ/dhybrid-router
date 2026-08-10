@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
 import { deleteApiKey, getApiKeyById, updateApiKey } from "@/lib/localDb";
+import { maskKey } from "@/lib/maskKey";
+import { verifyDashboardAuthToken } from "@/lib/auth/dashboardSession";
 
-// GET /api/keys/[id] - Get single key
+// GET /api/keys/[id] - Get single key (masked by default; full key only with
+// `?reveal=true` AND a valid dashboard JWT — requireLogin=false is NOT enough,
+// so remote configs cannot exfiltrate keys verbatim).
 export async function GET(request, { params }) {
   try {
     const { id } = await params;
@@ -9,7 +13,16 @@ export async function GET(request, { params }) {
     if (!key) {
       return NextResponse.json({ error: "Key not found" }, { status: 404 });
     }
-    return NextResponse.json({ key });
+    const url = new URL(request.url);
+    const reveal = url.searchParams.get("reveal") === "true";
+    if (reveal) {
+      const token = request.cookies.get("auth_token")?.value;
+      if (!(await verifyDashboardAuthToken(token))) {
+        return NextResponse.json({ key: { ...key, key: maskKey(key.key) } });
+      }
+      return NextResponse.json({ key });
+    }
+    return NextResponse.json({ key: { ...key, key: maskKey(key.key) } });
   } catch (error) {
     console.log("Error fetching key:", error);
     return NextResponse.json({ error: "Failed to fetch key" }, { status: 500 });

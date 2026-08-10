@@ -6,6 +6,7 @@ import {
   isValidApiKey,
 } from "../services/auth.js";
 import { getSettings, getCombos } from "@/lib/localDb";
+import { checkApiLimits, rateLimitResponse } from "@/lib/rateLimit";
 import { AI_PROVIDERS, resolveProviderId } from "@/shared/constants/providers.js";
 import { handleFetchCore } from "open-sse/handlers/fetch/index.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
@@ -58,6 +59,15 @@ export async function handleFetch(request) {
     if (!valid) {
       log.warn("AUTH", "Invalid API key (requireApiKey=true)");
       return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key");
+    }
+  }
+
+  // Rate limit + daily quota (same gate as chat)
+  if (apiKey) {
+    const { allow, reason, status, retryAfter, retryAfterHuman } = await checkApiLimits(apiKey, settings);
+    if (!allow) {
+      log.warn("RATE", `Limit hit: ${reason} (retry ${retryAfterHuman})`);
+      return rateLimitResponse(reason, retryAfter, status);
     }
   }
 

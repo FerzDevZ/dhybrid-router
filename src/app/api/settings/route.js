@@ -14,11 +14,17 @@ const SETTINGS_RESPONSE_HEADERS = {
 // Secrets must never be mass-assigned from request body (CWE-915)
 const PROTECTED_SETTING_KEYS = ["password", "mitmSudoEncrypted"];
 
+// GET response must also never echo these back (CWE-200)
+const SETTINGS_RESPONSE_STRIP = ["password", "oidcClientSecret", "mitmSudoEncrypted"];
+
 export async function GET() {
   try {
     const settings = await getSettings();
-    const { password, oidcClientSecret, ...safeSettings } = settings;
-    safeSettings.oidcConfigured = !!(safeSettings.oidcIssuerUrl && safeSettings.oidcClientId && oidcClientSecret);
+    const safeSettings = {};
+    for (const [k, v] of Object.entries(settings)) {
+      if (!SETTINGS_RESPONSE_STRIP.includes(k)) safeSettings[k] = v;
+    }
+    safeSettings.oidcConfigured = !!(safeSettings.oidcIssuerUrl && safeSettings.oidcClientId && settings.oidcClientSecret);
     
     const enableRequestLogs = process.env.ENABLE_REQUEST_LOGS === "true";
     const enableTranslator = process.env.ENABLE_TRANSLATOR === "true";
@@ -27,7 +33,7 @@ export async function GET() {
       ...safeSettings, 
       enableRequestLogs,
       enableTranslator,
-      hasPassword: !!password
+      hasPassword: !!settings.password
     }, { headers: SETTINGS_RESPONSE_HEADERS });
   } catch (error) {
     console.log("Error getting settings:", error);

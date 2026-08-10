@@ -5,9 +5,8 @@ import { fetchOidcDiscovery, getPublicOrigin, probeOidcClientSecret } from "@/li
 import { verifyDashboardAuthToken } from "@/lib/auth/dashboardSession";
 
 async function canAccessTestRoute() {
-  const settings = await getSettings();
-  if (settings.requireLogin === false) return true;
-
+  // Always require JWT auth for this route — even if requireLogin=false.
+  // Prevents unauthenticated SSRF/probe of internal endpoints.
   const cookieStore = await cookies();
   const token = cookieStore.get("auth_token")?.value;
   return await verifyDashboardAuthToken(token);

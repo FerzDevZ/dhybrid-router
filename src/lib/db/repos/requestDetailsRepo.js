@@ -68,19 +68,26 @@ function sanitizeHeaders(headers) {
   return sanitized;
 }
 
+import { randomUUID } from "node:crypto";
+
 function generateDetailId(model) {
   const timestamp = new Date().toISOString();
-  const random = Math.random().toString(36).substring(2, 8);
+  const random = randomUUID().slice(0, 8);
   const modelPart = model ? model.replace(/[^a-zA-Z0-9-]/g, "-") : "unknown";
   return `${timestamp}-${random}-${modelPart}`;
 }
 
 function truncateField(obj, maxSize) {
-  const str = JSON.stringify(obj || {});
-  if (str.length > maxSize) {
-    return { _truncated: true, _originalSize: str.length, _preview: str.substring(0, 200) };
+  try {
+    const str = JSON.stringify(obj || {});
+    if (str.length > maxSize) {
+      return { _truncated: true, _originalSize: str.length, _preview: str.substring(0, 200) };
+    }
+    return obj || {};
+  } catch (e) {
+    // Single record serialization failed — drop this field only
+    return { _truncated: true, _error: "Serialization failed" };
   }
-  return obj || {};
 }
 
 async function flushToDatabase() {

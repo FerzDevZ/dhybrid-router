@@ -40,8 +40,10 @@ export async function createDashboardAuthToken(claims = {}) {
 export async function verifyDashboardAuthToken(token) {
   if (!token) return false;
   try {
-    await jwtVerify(token, SECRET);
-    return true;
+    const { payload } = await jwtVerify(token, SECRET);
+    // Assert the authenticated claim so a future token type signed with the
+    // same secret cannot be used as an auth bypass.
+    return payload.authenticated === true;
   } catch {
     return false;
   }
@@ -76,7 +78,20 @@ export async function verifyDashboardPassword(password) {
   if (typeof password !== "string" || !password) return false;
   const settings = await getSettings();
   const storedHash = settings?.password;
-  if (storedHash) return bcrypt.compare(password, storedHash);
+  if (storedHash) {
+    // bcrypt.compare is constant-time internally
+    return bcrypt.compare(password, storedHash);
+  }
+  // Fallback to INITIAL_PASSWORD or DEFAULT_PASSWORD — this is a live
+  // fail-open default and should never be used in production. Warn loudly.
+  console.warn(
+    "[Auth] WARNING: No password hash in DB. Falling back to INITIAL_PASSWORD / DEFAULT_PASSWORD. " +
+    "Set INITIAL_PASSWORD env var or configure a password via the dashboard immediately."
+  );
   const initialPassword = process.env.INITIAL_PASSWORD || DEFAULT_PASSWORD;
-  return password === initialPassword;
+  // Use timingSafeEqual on buffered strings to avoid timing leaks even for the fallback.
+  const a = Buffer.from(password, "utf8");
+  const b = Buffer.from(initialPassword, "utf8");
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
 }

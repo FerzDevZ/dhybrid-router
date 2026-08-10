@@ -66,9 +66,18 @@ export async function GET() {
       const name = isCompatible
         ? (c.name || nodeNameMap[c.provider] || c.providerSpecificData?.nodeName || c.provider)
         : c.name;
+      // providerSpecificData may hold live OAuth credentials (copilotToken etc.)
+      let safeSpecific = c.providerSpecificData;
+      if (safeSpecific && typeof safeSpecific === "object") {
+        safeSpecific = { ...safeSpecific };
+        delete safeSpecific.copilotToken;
+        delete safeSpecific.accessToken;
+        delete safeSpecific.refreshToken;
+      }
       return {
         ...c,
         name,
+        providerSpecificData: safeSpecific,
         apiKey: undefined,
         accessToken: undefined,
         refreshToken: undefined,

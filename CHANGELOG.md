@@ -1,3 +1,34 @@
+# v0.6.1 (2026-08-10)
+
+## Security
+- API keys masked in all GET responses (keys, usage, request logs); full key
+  only via `?reveal=true` behind dashboard JWT
+- `custom-server` stamps `x-9r-custom-server`; `x-9r-real-ip` is only trusted
+  with the stamp, closing remote Host-spoofing of the loopback trust boundary
+- `claude-settings` moved to local-only + strips `ANTHROPIC_AUTH_TOKEN`;
+  settings GET no longer returns `mitmSudoEncrypted`; providers GET strips
+  `copilotToken`
+- Login hardening: timingSafeEqual fallback, authenticated flag assert,
+  robust JSON parsing; OIDC test endpoint requires JWT even when
+  `requireLogin=false`; login rate limiter only trusts stamped IPs
+- Daily quota increment made atomic (SQL `RETURNING`); rate-limit map pruned
+
+## Fixed
+- `search` handler returned `result.response` instead of the error response
+- chat handler wrapped in try/catch; bypass normalization no longer skips API
+  limits on fetch/stt/tts
+- `requestDetailsRepo` truncates oversized fields per-record without dropping
+  the whole row; `usageRepo`/logger use the shared `maskKey`
+- RTK gitStatus kept dropping untracked files in long form; gitDiff now keeps
+  context via `GIT_DIFF_CONTEXT_KEEP`
+- PXPIPE now honors `X-9Router-Token-Saver: off`
+- RTK stats use byte-level UTF-8 lengths + cross-request LRU cache (TTL 10m)
+
+## Features
+- `/api/healthz` for load balancers (public, no secret info)
+- Token Saver dashboard stats: savings by RTK/Headroom/PXPIPE, 30-day
+  timeline chart, auto-refresh (`/api/token-saver/stats`, JSONL events)
+
 # v0.6.0 (2026-08-09)
 
 ## Features

@@ -28,7 +28,16 @@ export async function POST(request) {
       );
     }
 
-    const { password } = await request.json();
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400, headers: NO_STORE_HEADERS });
+    }
+    const { password } = body;
+    if (typeof password !== "string" || !password) {
+      return NextResponse.json({ error: "Password required" }, { status: 400, headers: NO_STORE_HEADERS });
+    }
     const settings = await getSettings();
 
     // Block login via tunnel/tailscale if dashboard access is disabled
@@ -43,14 +52,9 @@ export async function POST(request) {
       return NextResponse.json({ error: "Password login is disabled. Use OIDC sign in." }, { status: 403 });
     }
 
-    let isValid = false;
-    if (storedHash) {
-      isValid = await bcrypt.compare(password, storedHash);
-    } else {
-      // Use env var or default
-      const initialPassword = process.env.INITIAL_PASSWORD || "123456";
-      isValid = password === initialPassword;
-    }
+    // Use the centralized verifyDashboardPassword (constant-time, timing-safe)
+    const { verifyDashboardPassword } = await import("@/lib/auth/dashboardSession");
+    const isValid = await verifyDashboardPassword(password);
 
     if (isValid) {
       recordSuccess(ip);

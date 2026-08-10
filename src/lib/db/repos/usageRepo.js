@@ -3,10 +3,11 @@ import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
 import { getMeta, setMeta } from "../helpers/metaStore.js";
 
+import { maskKey } from "@/lib/maskKey.js";
+
 function maskApiKey(key) {
-  if (!key || typeof key !== "string") return null;
-  if (key.length <= 8) return key.charAt(0) + "***";
-  return key.slice(0, 8) + "***";
+  if (!key || typeof key !== "string") return "";
+  return maskKey(key);
 }
 
 const PENDING_TIMEOUT_MS = 60 * 1000;

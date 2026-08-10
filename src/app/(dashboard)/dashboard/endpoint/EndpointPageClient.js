@@ -687,7 +687,21 @@ export default function APIPageClient({ machineId }) {
     return fullKey.slice(0, 6) + "•".repeat(fullKey.length - 10) + fullKey.slice(-4);
   };
 
-  const toggleKeyVisibility = (keyId) => {
+  const toggleKeyVisibility = async (keyId) => {
+    // Full key not in list (server masks it) — fetch it via reveal endpoint.
+    if (!visibleKeys.has(keyId)) {
+      try {
+        const res = await fetch(`/api/keys/${keyId}?reveal=true`, { cache: "no-store" });
+        if (res.ok) {
+          const data = await res.json();
+          const fullKey = data.key?.key;
+          if (!fullKey || fullKey.includes("***")) return; // not authorized to reveal
+          setKeys((prev) => prev.map((k) => (k.id === keyId ? { ...k, key: fullKey } : k)));
+        } else {
+          return;
+        }
+      } catch { return; }
+    }
     setVisibleKeys(prev => {
       const next = new Set(prev);
       if (next.has(keyId)) next.delete(keyId);
