@@ -9,7 +9,9 @@ import {
   recordAccountSuccess,
 } from "../services/auth.js";
 import { getSettings } from "@/lib/localDb";
+import { getUsageTodayTokens } from "@/lib/db/repos/usageRepo.js";
 import { checkApiLimits, rateLimitResponse } from "@/lib/rateLimit";
+import { checkBudget, suggestDegrade } from "@/lib/tokenSaver/budgetGuard.js";
 import { sendNotification } from "@/lib/notifications";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
@@ -245,7 +247,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid model format");
   }
 
-  const { provider, model } = modelInfo;
+  let { provider, model } = modelInfo;
 
   // Routing shown in the unified "▶" line (client model → provider/model)
 
@@ -294,6 +296,27 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // Use shared chatCore
     const chatSettings = await getSettings();
     const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
+
+    // Budget guard: block/degrade/warn before spending tokens
+    const usedTodayTokens = await getUsageTodayTokens().catch(() => 0);
+    const budgetCheck = checkBudget({ body, usedTodayTokens, model }, chatSettings);
+    if (budgetCheck.decision === "block") {
+      log.warn("BUDGET", `blocked: est=${budgetCheck.estimatedTokens} remaining=${budgetCheck.remainingTokens}`);
+      return errorResponse(HTTP_STATUS.TOO_MANY_REQUESTS, `Daily token budget exceeded (remaining ${budgetCheck.remainingTokens}); raise it in settings or wait for reset`);
+    }
+    if (budgetCheck.decision === "degrade" && chatSettings.tokenSaverAdvisor) {
+      const degradeTo = suggestDegrade(model);
+      if (degradeTo) {
+        log.warn("BUDGET", `degrading ${model} → ${degradeTo} (est=${budgetCheck.estimatedTokens}, remaining=${budgetCheck.remainingTokens})`);
+        model = degradeTo;
+        body = { ...body, model: `${provider}/${degradeTo}` };
+      }
+    } else if (budgetCheck.decision === "degrade") {
+      log.warn("BUDGET", `over budget but advisor off: est=${budgetCheck.estimatedTokens} remaining=${budgetCheck.remainingTokens}`);
+    } else if (budgetCheck.decision === "warn") {
+      log.warn("BUDGET", `near budget: used=${usedTodayTokens} remaining=${budgetCheck.remainingTokens}`);
+    }
+
     const result = await handleChatCore({
       body: { ...body, model: `${provider}/${model}` },
       modelInfo: { provider, model },
@@ -319,6 +342,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       pxpipeTransform: chatSettings.pxpipeEnabled ? await getPxpipeTransform() : null,
       onPxpipeEvent: appendPxpipeEvent,
       providerThinking,
+      settings: chatSettings,
       // Detect source format by endpoint + body
       sourceFormatOverride: request?.url ? detectFormatByEndpoint(new URL(request.url).pathname, body) : null,
       onCredentialsRefreshed: async (newCreds) => {

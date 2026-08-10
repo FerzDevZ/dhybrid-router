@@ -122,6 +122,13 @@ export default function TokenSaverClient() {
   const [pxpipeHealth, setPxpipeHealth] = useState(null);
   const [showPxpipeModal, setShowPxpipeModal] = useState(false);
   const [pxpipeActionLoading, setPxpipeActionLoading] = useState(false);
+  // Auto-plans & budget (custom per-model/format saver overrides + daily budget guard)
+  const [tokenSaverPlansJson, setTokenSaverPlansJson] = useState("[]");
+  const [budgetEnabled, setBudgetEnabled] = useState(false);
+  const [budgetDailyTokens, setBudgetDailyTokens] = useState(0);
+  const [budgetAction, setBudgetAction] = useState("warn");
+  const [budgetAdvisor, setBudgetAdvisor] = useState(false);
+  const [planBudgetSaved, setPlanBudgetSaved] = useState(false);
   const [pxpipeActionError, setPxpipeActionError] = useState("");
   const [locale, setLocale] = useState(() => getCurrentLocale());
 
@@ -145,6 +152,24 @@ export default function TokenSaverClient() {
       console.log("Error updating setting:", error);
     }
   }, []);
+
+  const savePlansAndBudget = useCallback(async () => {
+    let plans = [];
+    try {
+      plans = JSON.parse(tokenSaverPlansJson || "[]");
+      if (!Array.isArray(plans)) throw new Error("must be an array");
+    } catch (e) {
+      alert(`Invalid tokenSaverPlans JSON: ${e.message}`);
+      return;
+    }
+    await patchSetting({
+      tokenSaverPlans: plans,
+      tokenSaverBudget: { enabled: budgetEnabled, dailyTokens: Number(budgetDailyTokens) || 0, action: budgetAction },
+      tokenSaverAdvisor: budgetAdvisor,
+    });
+    setPlanBudgetSaved(true);
+    setTimeout(() => setPlanBudgetSaved(false), 2000);
+  }, [tokenSaverPlansJson, budgetEnabled, budgetDailyTokens, budgetAction, budgetAdvisor, patchSetting]);
 
   const fetchTokenSaverStats = useCallback(async () => {
     setStatsLoading(true);
@@ -521,6 +546,13 @@ export default function TokenSaverClient() {
           setPonytailLevel(data.ponytailLevel || "full");
           setPxpipeEnabled(!!data.pxpipeEnabled);
           if (typeof data.pxpipeMinChars === "number") setPxpipeMinChars(data.pxpipeMinChars);
+          // Auto-plans & budget
+          setTokenSaverPlansJson(JSON.stringify(Array.isArray(data.tokenSaverPlans) ? data.tokenSaverPlans : [], null, 2));
+          const budget = data.tokenSaverBudget || {};
+          setBudgetEnabled(budget.enabled === true);
+          setBudgetDailyTokens(budget.dailyTokens || 0);
+          setBudgetAction(budget.action || "warn");
+          setBudgetAdvisor(data.tokenSaverAdvisor === true);
           refreshHeadroomStatus();
           // PRD: run the PXPIPE health check automatically when the page opens
           refreshPxpipeStatus().then(runPxpipeHealth);
@@ -713,6 +745,13 @@ export default function TokenSaverClient() {
                 title="Total Requests"
                 value={tokenSaverStats.windows.all.requests.toLocaleString()}
                 icon="tune"
+              />
+              <StatCard
+                title="Custom Plans Active"
+                value={(tokenSaverStats.byPlan || []).length.toLocaleString()}
+                subtitle={(tokenSaverStats.byPlan || []).map((p) => p.planId).join(", ") || "none"}
+                icon="route"
+                color="info"
               />
               <StatCard
                 title="RTK Saved"
@@ -1108,6 +1147,72 @@ export default function TokenSaverClient() {
               checked={ponytailEnabled}
               onChange={() => handlePonytailEnabled(!ponytailEnabled)}
             />
+          </div>
+        </div>
+        {/* Auto-Plans & Budget — context-aware saver overrides + daily token budget */}
+        <div className="pt-4 mt-4 border-t border-border space-y-4">
+          <div className="flex items-start justify-between gap-4 flex-wrap">
+            <div className="min-w-0 flex-1">
+              <p className="font-medium">Auto-Plans (per-model/format saver overrides)</p>
+              <p className="text-sm text-text-muted">
+                JSON array of plans: <code>{"{ id, modelRegex, provider?, format?, minPayloadBytes?, savers: { rtk, headroom, pxpipe, caveman, ponytail }, budgetTokens?, degradeTo? }"}</code>.
+                First match wins; unmatched requests inherit global toggles.
+              </p>
+            </div>
+          </div>
+          <textarea
+            value={tokenSaverPlansJson}
+            onChange={(e) => setTokenSaverPlansJson(e.target.value)}
+            rows={6}
+            spellCheck={false}
+            className="w-full rounded border border-border bg-surface-1 p-2 font-mono text-xs text-text-main"
+          />
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={budgetEnabled}
+                onChange={(e) => setBudgetEnabled(e.target.checked)}
+                className="accent-primary"
+              />
+              Enable daily budget guard
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              Daily token budget
+              <input
+                type="number"
+                min={0}
+                value={budgetDailyTokens}
+                onChange={(e) => setBudgetDailyTokens(e.target.value)}
+                className="w-28 rounded border border-border bg-surface-1 px-2 py-1 text-xs"
+              />
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              On over-budget
+              <select
+                value={budgetAction}
+                onChange={(e) => setBudgetAction(e.target.value)}
+                className="rounded border border-border bg-surface-1 px-2 py-1 text-xs"
+              >
+                <option value="warn">warn only</option>
+                <option value="degrade">degrade model</option>
+                <option value="block">block request</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={budgetAdvisor}
+                onChange={(e) => setBudgetAdvisor(e.target.checked)}
+                className="accent-primary"
+              />
+              Auto-degrade to cheaper model
+            </label>
+          </div>
+          <div className="flex justify-end">
+            <Button variant="primary" size="sm" onClick={savePlansAndBudget}>
+              {planBudgetSaved ? "Saved" : "Save Plans & Budget"}
+            </Button>
           </div>
         </div>
         {/* PXPIPE hidden from UI — experimental, not exposed to users yet */}

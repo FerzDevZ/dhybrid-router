@@ -335,6 +335,20 @@ export async function getUsageHistory(filter = {}) {
   }));
 }
 
+// Sum of prompt+completion tokens used today (for budget guard).
+export async function getUsageTodayTokens() {
+  const db = await getAdapter();
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const rows = db.all(`SELECT tokens FROM usageHistory WHERE timestamp >= ?`, [start.toISOString()]);
+  let total = 0;
+  for (const r of rows) {
+    const t = parseJson(r.tokens, {});
+    total += (t.prompt_tokens || t.input_tokens || 0) + (t.completion_tokens || t.output_tokens || 0);
+  }
+  return total;
+}
+
 function loadDaysInRange(adapter, maxDays) {
   if (maxDays == null) {
     return adapter.all(`SELECT dateKey, data FROM usageDaily`);

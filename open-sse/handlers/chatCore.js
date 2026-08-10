@@ -13,6 +13,7 @@ import { HTTP_STATUS, TOKEN_SAVER_HEADER } from "../config/runtimeConfig.js";
 import { handleBypassRequest } from "../utils/bypassHandler.js";
 import { trackPendingRequest, appendRequestLog, saveRequestDetail, saveRequestUsage } from "@/lib/usageDb.js";
 import { appendTokenSaverEvent } from "@/lib/tokenSaver/events.js";
+import { planTokenSaver, estimateBodyBytes, PLAN_MATCH_NONE } from "@/lib/tokenSaver/planner.js";
 import { getExecutor } from "../executors/index.js";
 import { supportsGrokCliReasoningEffort } from "../config/grokCli.js";
 import { buildRequestDetail, extractRequestConfig } from "./chatCore/requestDetail.js";
@@ -58,7 +59,7 @@ export function stripContinuityFields(body) {
   return body;
 }
 
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, settings }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
   // Stable per-session color so all lines of one CLI conversation share a tag
@@ -229,14 +230,32 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // Per-request opt-out: client can bypass all token savers via header
   const tokenSaverEnabled = clientRawRequest?.headers?.[TOKEN_SAVER_HEADER]?.toLowerCase() !== "off";
 
+  // Context-aware plan: custom per-model/format savers override (if configured)
+  const saverPlan = planTokenSaver({
+    provider,
+    model,
+    pathname: clientRawRequest?.url ? new URL(clientRawRequest.url).pathname : "",
+    body: translatedBody,
+    payloadBytes: estimateBodyBytes(translatedBody),
+  }, settings);
+  const planSavers = saverPlan?.savers; // null → inherit global toggles
+  const rtkEnabledEff = planSavers ? !!planSavers.rtk : rtkEnabled;
+  const headroomEnabledEff = planSavers ? !!planSavers.headroom : headroomEnabled;
+  const cavemanEnabledEff = planSavers ? !!planSavers.caveman : cavemanEnabled;
+  const ponytailEnabledEff = planSavers ? !!planSavers.ponytail : ponytailEnabled;
+  const pxpipeEnabledEff = planSavers ? !!planSavers.pxpipe : pxpipeEnabled;
+  if (saverPlan?.planId && saverPlan.planId !== PLAN_MATCH_NONE) {
+    log?.info?.("TOKEN-SAVER", `plan=${saverPlan.planId} reason=${saverPlan.reason} savers=${JSON.stringify(planSavers || "global")} budget=${saverPlan.budgetTokens ?? "-"} degradeTo=${saverPlan.degradeTo || "-"}`);
+  }
+
   // RTK: compress tool_result content
-  const rtkStats = compressMessages(translatedBody, tokenSaverEnabled && rtkEnabled);
+  const rtkStats = compressMessages(translatedBody, tokenSaverEnabled && rtkEnabledEff);
   const rtkLine = formatRtkLog(rtkStats);
   if (rtkLine) console.log(rtkLine);
 
   // Headroom: optional external proxy compression; fail open if proxy is absent.
   const headroomDiagnostics = {};
-  const headroomStats = await compressWithHeadroom(translatedBody, { enabled: tokenSaverEnabled && headroomEnabled, url: headroomUrl, model: upstreamModel, format: finalFormat, compressUserMessages: headroomCompressUserMessages, diagnostics: headroomDiagnostics });
+  const headroomStats = await compressWithHeadroom(translatedBody, { enabled: tokenSaverEnabled && headroomEnabledEff, url: headroomUrl, model: upstreamModel, format: finalFormat, compressUserMessages: headroomCompressUserMessages, diagnostics: headroomDiagnostics });
   const headroomLine = formatHeadroomLog(headroomStats);
   const headroomSizeLine = formatHeadroomSizeLog(headroomDiagnostics);
   if (headroomLine) {
@@ -244,19 +263,19 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     if (isHeadroomPhantomSavings(headroomStats, headroomDiagnostics)) {
       log?.warn?.("HEADROOM", `reported token delta, but outbound JSON shrank <5%; provider may bill near-original payload | ${formatHeadroomSizeLog(headroomDiagnostics)}`);
     }
-  } else if (tokenSaverEnabled && headroomEnabled) log?.warn?.("HEADROOM", `skipped: ${headroomDiagnostics.reason || "compression unavailable"}${headroomDiagnostics.endpoint ? ` (${headroomDiagnostics.endpoint})` : ""}`);
+  } else if (tokenSaverEnabled && headroomEnabledEff) log?.warn?.("HEADROOM", `skipped: ${headroomDiagnostics.reason || "compression unavailable"}${headroomDiagnostics.endpoint ? ` (${headroomDiagnostics.endpoint})` : ""}`);
 
   // Token-saver flags accumulator for the single "⚙" log line below.
   const xf = [];
 
   // Caveman: inject terse-style system prompt
-  if (tokenSaverEnabled && cavemanEnabled && cavemanLevel) {
+  if (tokenSaverEnabled && cavemanEnabledEff && cavemanLevel) {
     injectCaveman(translatedBody, finalFormat, cavemanLevel);
     xf.push(`CAVEMAN:${cavemanLevel}`);
   }
 
   // Ponytail: inject lazy-senior-dev system prompt
-  if (tokenSaverEnabled && ponytailEnabled && ponytailLevel) {
+  if (tokenSaverEnabled && ponytailEnabledEff && ponytailLevel) {
     injectPonytail(translatedBody, finalFormat, ponytailLevel);
     xf.push(`PONYTAIL:${ponytailLevel}`);
   }
@@ -264,7 +283,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // PXPIPE: image bulky context (Claude-format bodies only), last saver before dispatch
   let pxpipeSummary = null;
   // Respect the per-request X-9Router-Token-Saver: off header (same gate as RTK/Headroom/Caveman/Ponytail)
-  if (pxpipeEnabled && tokenSaverEnabled) {
+  if (pxpipeEnabledEff && tokenSaverEnabled) {
     const pxpipeResult = await compressWithPxpipe(translatedBody, {
       enabled: true, format: finalFormat, model: upstreamModel,
       minChars: pxpipeMinChars, timeoutMs: pxpipeTimeoutMs, transform: pxpipeTransform,
@@ -285,8 +304,11 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       rtk: rtkStats,
       headroom: headroomStats,
       pxpipe: pxpipeSummary,
-      caveman: tokenSaverEnabled && cavemanEnabled && cavemanLevel ? { applied: true, level: cavemanLevel } : { applied: false },
-      ponytail: tokenSaverEnabled && ponytailEnabled && ponytailLevel ? { applied: true, level: ponytailLevel } : { applied: false },
+      caveman: tokenSaverEnabled && cavemanEnabledEff && cavemanLevel ? { applied: true, level: cavemanLevel } : { applied: false },
+      ponytail: tokenSaverEnabled && ponytailEnabledEff && ponytailLevel ? { applied: true, level: ponytailLevel } : { applied: false },
+      planId: saverPlan.planId,
+      planReason: saverPlan.reason,
+      budgetDecision: saverPlan.budgetDecision || null,
     });
   } catch { /* stats must not break requests */ }
 

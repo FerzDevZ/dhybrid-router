@@ -251,11 +251,47 @@ export function getTokenSaverStats({ timelineDays = 30, recentLimit = 100 } = {}
     .map(([name, r]) => ({ name, requests: r.requests, tokensSaved: r.tokensSaved, rtk: r.rtk, headroom: r.headroom, pxpipe: r.pxpipe, img: r.imgs, models: r.models ? [...r.models].sort() : undefined }))
     .sort((a, b) => b.tokensSaved - a.tokensSaved);
 
+  // Per-plan breakdown (custom plans only) for dashboard insight
+  const byPlan = new Map();
+  for (const ev of events) {
+    if (!ev.planId || ev.planId === "none" || ev.planReason === "default") continue;
+    const row = byPlan.get(ev.planId) || { planId: ev.planId, requests: 0, tokensSaved: 0 };
+    row.requests++;
+    row.tokensSaved +=
+      (ev.rtk && ev.rtk.hits ? (ev.rtk.bytesBefore || 0) - (ev.rtk.bytesAfter || 0) : 0) +
+      (ev.headroom?.tokens_saved > 0 ? ev.headroom.tokens_saved : 0) +
+      (ev.pxpipe?.applied ? ev.pxpipe.tokensSavedEst || 0 : 0);
+    byPlan.set(ev.planId, row);
+  }
+
   return {
     windows,
     byModel: toSortedList(byModel),
     byProvider: toSortedList(byProvider),
+    byPlan: [...byPlan.values()].sort((a, b) => b.tokensSaved - a.tokensSaved),
     timeline: [...timeline.values()],
     recent: events.slice(-recentLimit).reverse(),
+  };
+}
+
+// Lightweight plan-efficiency stats for the dashboard widget (no timeline).
+export function getPlanStats() {
+  const events = readTokenSaverEvents({ limit: 500 });
+  const byPlan = new Map();
+  const byBudgetDecision = { permit: 0, warn: 0, degrade: 0, block: 0 };
+  for (const ev of events) {
+    if (ev.budgetDecision) byBudgetDecision[ev.budgetDecision] = (byBudgetDecision[ev.budgetDecision] || 0) + 1;
+    if (!ev.planId || ev.planId === "none") continue;
+    const row = byPlan.get(ev.planId) || { planId: ev.planId, requests: 0, tokensSaved: 0 };
+    row.requests++;
+    row.tokensSaved +=
+      (ev.rtk && ev.rtk.hits ? (ev.rtk.bytesBefore || 0) - (ev.rtk.bytesAfter || 0) : 0) +
+      (ev.headroom?.tokens_saved > 0 ? ev.headroom.tokens_saved : 0) +
+      (ev.pxpipe?.applied ? ev.pxpipe.tokensSavedEst || 0 : 0);
+    byPlan.set(ev.planId, row);
+  }
+  return {
+    byPlan: [...byPlan.values()].sort((a, b) => b.tokensSaved - a.tokensSaved),
+    byBudgetDecision,
   };
 }

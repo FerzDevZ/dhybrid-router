@@ -56,6 +56,9 @@ const DEFAULT_SETTINGS = {
   pxpipeAutoInstall: true,
   pxpipeMinChars: 25000,
   pxpipeTimeoutMs: 15000,
+  tokenSaverPlans: [],           // array of {id, modelRegex, format, minPayloadBytes, savers:{rtk,headroom,pxpipe,caveman,ponytail}, budgetTokens, degradeTo}
+  tokenSaverBudget: { enabled: false, dailyTokens: 0, warnThresholdPct: 80, action: "warn" }, // warn|degrade|block
+  tokenSaverAdvisor: false,      // auto-suggest degrade model on budget
 };
 
 async function readRaw() {
