@@ -10,6 +10,7 @@ import { AI_PROVIDERS, resolveProviderId } from "@/shared/constants/providers.js
 import { handleSearchCore } from "open-sse/handlers/search/index.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
+import { checkApiLimits, rateLimitResponse } from "@/lib/rateLimit";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { handleComboChat, getComboModelsFromData } from "open-sse/services/combo.js";
@@ -55,6 +56,19 @@ export async function handleSearch(request) {
     if (!valid) {
       log.warn("AUTH", "Invalid API key (requireApiKey=true)");
       return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key");
+    }
+  }
+
+  // Per-key throttle — rate limit (RPM window) + daily quota; only when a key is presented
+  if (apiKey) {
+    const limit = await checkApiLimits(apiKey, settings);
+    if (!limit.allowed) {
+      log.warn("AUTH", limit.reason === "rate_limit"
+        ? `API key rate limited (${settings.apiKeyRateLimit?.rpm || 60}/min)`
+        : `API key daily quota reached (${limit.used}/${limit.limit})`);
+      return rateLimitResponse(limit.retryAfterSec, limit.reason === "rate_limit"
+        ? "Rate limit exceeded for this API key"
+        : "Daily quota exceeded for this API key");
     }
   }
 
