@@ -62,6 +62,10 @@ const DEFAULT_SETTINGS = {
   historyTrimKeepMin: 6,       // messages always kept at the tail (besides system)
   summaryInject: false,        // collapse middle history into one heuristic summary
   summaryInjectAboveBytes: 90000,
+  forceTruncateBytes: 0,       // 0 = off; tool_result > N bytes → head/tail truncation
+  dedupImageContent: false,    // drop repeated identical image blocks
+  dropEmptyMessages: false,    // drop empty/whitespace-only messages
+  capOutputTokens: false,      // adaptive max_tokens estimate (never touches thinking)
   tokenSaverMode: "off",       // off|lite|full|ultra quick-set presets
   tokenSaverPlans: [],           // array of {id, modelRegex, format, minPayloadBytes, savers:{rtk,headroom,pxpipe,caveman,ponytail}, budgetTokens, degradeTo}
   tokenSaverBudget: { enabled: false, dailyTokens: 0, warnThresholdPct: 80, action: "warn" }, // warn|degrade|block

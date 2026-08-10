@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { dedupMessages, trimHistory, injectConversationSummary } from "../../open-sse/rtk/trimming.js";
+import { dedupMessages, trimHistory, injectConversationSummary, truncateToolResults, dedupImageContent, dropEmptyMessages } from "../../open-sse/rtk/trimming.js";
 
 function msg(role, content) {
   return { role, content };
@@ -127,5 +127,98 @@ describe("injectConversationSummary", () => {
     const short = { messages: [msg("user", "a"), msg("assistant", "b"), msg("user", "c")] };
     expect(injectConversationSummary(short, 1)).toBeNull();
     expect(short.messages).toHaveLength(3);
+  });
+});
+
+describe("truncateToolResults", () => {
+  const big = "x".repeat(50000);
+
+  it("truncates oversized generic tool results head/tail with marker", () => {
+    const body = { messages: [{ role: "tool", content: big }] };
+    const stats = truncateToolResults(body, 10000);
+    expect(stats).not.toBeNull();
+    expect(stats.truncated).toBe(1);
+    expect(stats.savedBytes).toBeGreaterThan(30000);
+    const out = body.messages[0].content;
+    expect(out).toContain("[...truncated:");
+    expect(out.length).toBeLessThan(big.length * 0.4);
+    // head + tail preserved
+    expect(out.startsWith("x".repeat(100))).toBe(true);
+    expect(out.endsWith("x".repeat(50))).toBe(true);
+  });
+
+  it("preserves error traces", () => {
+    const body = {
+      messages: [{ role: "user", content: [{ type: "tool_result", is_error: true, content: big }] }],
+    };
+    expect(truncateToolResults(body, 10000)).toBeNull();
+    expect(body.messages[0].content[0].content).toBe(big);
+  });
+
+  it("no-op under threshold and off at 0", () => {
+    const body = { messages: [{ role: "tool", content: "small" }] };
+    expect(truncateToolResults(body, 10000)).toBeNull();
+    expect(truncateToolResults(body, 0)).toBeNull();
+  });
+
+  it("fails open on unknown shape", () => {
+    expect(truncateToolResults({ contents: [] }, 10)).toBeNull();
+    expect(truncateToolResults(null, 10)).toBeNull();
+  });
+});
+
+describe("dedupImageContent", () => {
+  it("drops repeated identical image blocks across messages", () => {
+    const body = {
+      messages: [
+        { role: "user", content: [{ type: "text", text: "look" }, { type: "image", source: { type: "base64", data: "AAA" } }] },
+        { role: "user", content: [{ type: "image", source: { type: "base64", data: "AAA" } }, { type: "text", text: "again" }] },
+        { role: "user", content: [{ type: "image", source: { type: "base64", data: "BBB" } }] },
+      ],
+    };
+    const stats = dedupImageContent(body);
+    expect(stats).not.toBeNull();
+    expect(stats.removed).toBe(1);
+    expect(body.messages[1].content).toHaveLength(1); // dup image dropped, text kept
+    expect(body.messages[2].content).toHaveLength(1); // unique image kept
+  });
+
+  it("never touches text or tool content", () => {
+    const body = { messages: [{ role: "tool", content: "a" }, { role: "tool", content: "a" }] };
+    expect(dedupImageContent(body)).toBeNull();
+    expect(body.messages).toHaveLength(2);
+  });
+
+  it("fails open on unknown shape", () => {
+    expect(dedupImageContent({ contents: [] })).toBeNull();
+    expect(dedupImageContent(null)).toBeNull();
+  });
+});
+
+describe("dropEmptyMessages", () => {
+  it("drops empty and whitespace-only messages", () => {
+    const body = {
+      messages: [
+        { role: "user", content: "hello" },
+        { role: "user", content: "   " },
+        { role: "assistant", content: [] },
+        { role: "user", content: "world" },
+      ],
+    };
+    const stats = dropEmptyMessages(body);
+    expect(stats).not.toBeNull();
+    expect(stats.removed).toBe(2);
+    expect(body.messages).toHaveLength(2);
+  });
+
+  it("keeps structural messages without content", () => {
+    const body = { messages: [{ role: "user", content: "a" }, { role: "assistant", tool_calls: [{ id: "t1" }] }] };
+    expect(dropEmptyMessages(body)).toBeNull();
+    expect(body.messages).toHaveLength(2);
+  });
+
+  it("fails open on unknown shape / single message", () => {
+    expect(dropEmptyMessages({ contents: [] })).toBeNull();
+    expect(dropEmptyMessages({ messages: [{ role: "user", content: "" }] })).toBeNull();
   });
 });

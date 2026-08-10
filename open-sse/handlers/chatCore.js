@@ -25,7 +25,8 @@ import { dedupeTools } from "../utils/toolDeduper.js";
 import { injectCaveman } from "../rtk/caveman.js";
 import { injectPonytail } from "../rtk/ponytail.js";
 import { compressMessages, formatRtkLog } from "../rtk/index.js";
-import { dedupMessages, injectConversationSummary, trimHistory } from "../rtk/trimming.js";
+import { dedupMessages, dedupImageContent, dropEmptyMessages, injectConversationSummary, trimHistory, truncateToolResults } from "../rtk/trimming.js";
+import { capOutputTokens } from "../rtk/outputCaps.js";
 import { compressWithHeadroom, formatHeadroomLog, formatHeadroomSizeLog, isHeadroomPhantomSavings } from "../rtk/headroom.js";
 import { compressWithPxpipe } from "../rtk/pxpipe.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
@@ -259,6 +260,11 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const dedupEff = planSavers ? !!planSavers.dedupMessages : settings?.dedupMessages === true;
   const historyTrimEff = planSavers ? !!planSavers.historyTrim : (settings?.historyTrimMaxBytes ?? 0) > 0;
   const summaryEff = planSavers ? !!planSavers.summaryInject : settings?.summaryInject === true;
+  // v2 savers: generic tool-result truncation, image dedup, empty messages, output cap
+  const forceTruncateEff = planSavers ? !!planSavers.forceTruncate : (settings?.forceTruncateBytes ?? 0) > 0;
+  const dedupImageEff = planSavers ? !!planSavers.dedupImage : settings?.dedupImageContent === true;
+  const dropEmptyEff = planSavers ? !!planSavers.dropEmpty : settings?.dropEmptyMessages === true;
+  const capOutputEff = planSavers ? !!planSavers.capOutput : settings?.capOutputTokens === true;
   // Plan-level per-request token budget: when the request exceeds it, force the
   // aggressive savers on instead of blocking (recorded as plan-over-budget).
   const planBudget = enforcePlanBudget(saverPlan, translatedBody);
@@ -301,6 +307,29 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     if (dedupStats) {
       trimmingStats.dedup = dedupStats;
       xf.push(`DEDUP:${dedupStats.removed}`);
+    }
+  }
+
+  // v2: empty messages → repeated images → generic tool-result truncation
+  if (tokenSaverEnabled && dropEmptyEff) {
+    const emptyStats = dropEmptyMessages(translatedBody);
+    if (emptyStats) {
+      trimmingStats.dropEmpty = emptyStats;
+      xf.push(`EMPTY:${emptyStats.removed}`);
+    }
+  }
+  if (tokenSaverEnabled && dedupImageEff) {
+    const imgStats = dedupImageContent(translatedBody);
+    if (imgStats) {
+      trimmingStats.dedupImage = imgStats;
+      xf.push(`IMG:${imgStats.removed}`);
+    }
+  }
+  if (tokenSaverEnabled && forceTruncateEff) {
+    const truncStats = truncateToolResults(translatedBody, settings?.forceTruncateBytes ?? 0);
+    if (truncStats) {
+      trimmingStats.forceTruncate = truncStats;
+      xf.push(`TRUNC:${truncStats.truncated}`);
     }
   }
 
@@ -348,6 +377,13 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     try { onPxpipeEvent?.({ provider, model, ...pxpipeSummary }); } catch { /* stats must not break requests */ }
   }
 
+  // Output cap: adaptive max_tokens (never touches reasoning/thinking), last before dispatch
+  let capStats = null;
+  if (tokenSaverEnabled && capOutputEff) {
+    capStats = capOutputTokens(translatedBody, true);
+    if (capStats) xf.push(`CAP:max=${capStats.maxTokens}`);
+  }
+
   if (xf.length && log?.line) log.line(reqTag, "⚙", xf.join(" · "));
 
   // Emit token saver stats event (fire-and-forget, must not break requests)
@@ -363,6 +399,10 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       dedup: trimmingStats.dedup || null,
       trim: trimmingStats.trim || null,
       summary: trimmingStats.summary || null,
+      forceTruncate: trimmingStats.forceTruncate || null,
+      dedupImage: trimmingStats.dedupImage || null,
+      dropEmpty: trimmingStats.dropEmpty || null,
+      capOutput: capStats,
       planId: saverPlan.planId,
       planReason: saverPlan.reason,
       budgetDecision: budgetDecision || null,

@@ -124,6 +124,11 @@ export default function TokenSaverClient() {
   const [summaryInject, setSummaryInject] = useState(false);
   const [summaryInjectAboveBytes, setSummaryInjectAboveBytes] = useState(90000);
   const [headroomCompressUserMessages, setHeadroomCompressUserMessages] = useState(false);
+  // v2 savers: force truncate, image dedup, empty messages, output cap
+  const [forceTruncateBytes, setForceTruncateBytes] = useState(0);
+  const [dedupImageContent, setDedupImageContent] = useState(false);
+  const [dropEmptyMessages, setDropEmptyMessages] = useState(false);
+  const [capOutputTokens, setCapOutputTokens] = useState(false);
   // Mode preset quick-set (off|lite|full|ultra)
   const [saverMode, setSaverMode] = useState("off");
   const [saverModeMsg, setSaverModeMsg] = useState("");
@@ -558,6 +563,33 @@ export default function TokenSaverClient() {
     patchSetting({ summaryInjectAboveBytes: next });
   };
 
+  // v2 savers handlers
+  const handleForceTruncateEnabled = (value) => {
+    setForceTruncateBytes(value ? 40000 : 0);
+    patchSetting({ forceTruncateBytes: value ? 40000 : 0 });
+  };
+
+  const handleForceTruncateBlur = () => {
+    const next = Math.max(0, Number(forceTruncateBytes) || 0);
+    setForceTruncateBytes(next);
+    patchSetting({ forceTruncateBytes: next });
+  };
+
+  const handleDedupImageEnabled = (value) => {
+    setDedupImageContent(value);
+    patchSetting({ dedupImageContent: value });
+  };
+
+  const handleDropEmptyEnabled = (value) => {
+    setDropEmptyMessages(value);
+    patchSetting({ dropEmptyMessages: value });
+  };
+
+  const handleCapOutputEnabled = (value) => {
+    setCapOutputTokens(value);
+    patchSetting({ capOutputTokens: value });
+  };
+
   const handleSaverModeApply = async () => {
     const patch = applySaverMode(saverMode);
     if (!patch || Object.keys(patch).length === 0) return;
@@ -578,6 +610,10 @@ export default function TokenSaverClient() {
     if (typeof patch.headroomMinBytes === "number") setHeadroomMinBytes(patch.headroomMinBytes);
     if (typeof patch.headroomCodeAware === "boolean") setCodeAware(patch.headroomCodeAware);
     if (typeof patch.headroomKompress === "boolean") setKompress(patch.headroomKompress);
+    if (typeof patch.forceTruncateBytes === "number") setForceTruncateBytes(patch.forceTruncateBytes);
+    if (typeof patch.dedupImageContent === "boolean") setDedupImageContent(patch.dedupImageContent);
+    if (typeof patch.dropEmptyMessages === "boolean") setDropEmptyMessages(patch.dropEmptyMessages);
+    if (typeof patch.capOutputTokens === "boolean") setCapOutputTokens(patch.capOutputTokens);
     // Super-Power: escalate budget action to degrade only when a budget already exists
     if (saverMode === "ultra" && budgetEnabled) {
       patch.tokenSaverBudget = { action: "degrade" };
@@ -665,6 +701,11 @@ export default function TokenSaverClient() {
           setSummaryInject(data.summaryInject === true);
           if (typeof data.summaryInjectAboveBytes === "number") setSummaryInjectAboveBytes(data.summaryInjectAboveBytes);
           setHeadroomCompressUserMessages(data.headroomCompressUserMessages === true);
+          // v2 savers
+          if (typeof data.forceTruncateBytes === "number") setForceTruncateBytes(data.forceTruncateBytes);
+          setDedupImageContent(data.dedupImageContent === true);
+          setDropEmptyMessages(data.dropEmptyMessages === true);
+          setCapOutputTokens(data.capOutputTokens === true);
           // Auto-plans & budget
           setTokenSaverPlansJson(JSON.stringify(Array.isArray(data.tokenSaverPlans) ? data.tokenSaverPlans : [], null, 2));
           const budget = data.tokenSaverBudget || {};
@@ -858,6 +899,16 @@ export default function TokenSaverClient() {
     summaryInject,
     summaryInjectAboveBytes,
     headroomCompressUserMessages,
+    pxpipeEnabled,
+    pxpipeMinChars,
+    headroomMinBytes,
+    headroomCodeAware: codeAware,
+    headroomKompress: kompress,
+    tokenSaverAdvisor: budgetAdvisor,
+    forceTruncateBytes,
+    dedupImageContent,
+    dropEmptyMessages,
+    capOutputTokens,
   });
 
   return (
@@ -1416,6 +1467,75 @@ export default function TokenSaverClient() {
                 onChange={() => handleSummaryEnabled(!summaryInject)}
               />
             </div>
+          </div>
+          <div className="flex items-center justify-between gap-4 flex-wrap pt-4 border-t border-border">
+            <div className="min-w-0 flex-1">
+              <p className="font-medium">Force truncate tool result</p>
+              <p className="text-sm text-text-muted">
+                Generic head/tail truncation for oversized tool results that
+                pattern filters miss (JSON dumps, plain files). 0 = off
+              </p>
+            </div>
+            <div className="flex items-center gap-3 shrink-0">
+              {forceTruncateBytes > 0 && (
+                <label className="flex items-center gap-1.5 text-xs text-text-muted">
+                  max bytes
+                  <Input
+                    type="number"
+                    value={forceTruncateBytes}
+                    onChange={(e) => setForceTruncateBytes(Number(e.target.value))}
+                    onBlur={handleForceTruncateBlur}
+                    className="w-24"
+                  />
+                </label>
+              )}
+              <Toggle
+                checked={forceTruncateBytes > 0}
+                onChange={() => handleForceTruncateEnabled(forceTruncateBytes <= 0)}
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between gap-4 flex-wrap pt-4 border-t border-border">
+            <div className="min-w-0 flex-1">
+              <p className="font-medium">Dedup gambar identik</p>
+              <p className="text-sm text-text-muted">
+                Drop repeated identical image blocks (screenshots berulang dari
+                coding agent) — teks & tool tidak pernah disentuh
+              </p>
+            </div>
+            <Toggle
+              checked={dedupImageContent}
+              onChange={() => handleDedupImageEnabled(!dedupImageContent)}
+            />
+          </div>
+
+          <div className="flex items-center justify-between gap-4 flex-wrap pt-4 border-t border-border">
+            <div className="min-w-0 flex-1">
+              <p className="font-medium">Buang pesan kosong</p>
+              <p className="text-sm text-text-muted">
+                Drop empty / whitespace-only messages before sending
+              </p>
+            </div>
+            <Toggle
+              checked={dropEmptyMessages}
+              onChange={() => handleDropEmptyEnabled(!dropEmptyMessages)}
+            />
+          </div>
+
+          <div className="flex items-center justify-between gap-4 flex-wrap pt-4 border-t border-border">
+            <div className="min-w-0 flex-1">
+              <p className="font-medium">Cap output (max_tokens adaptif)</p>
+              <p className="text-sm text-text-muted">
+                Estimate kebutuhan output dari prompt terakhir (kode → 4K,
+                teks → 1K) dan turunkan max_tokens bila absurd. Tidak menyentuh
+                thinking/reasoning
+              </p>
+            </div>
+            <Toggle
+              checked={capOutputTokens}
+              onChange={() => handleCapOutputEnabled(!capOutputTokens)}
+            />
           </div>
         </div>
 

@@ -83,7 +83,7 @@ export function planTokenSaver(ctx, settings = {}) {
 function normalizeSavers(savers) {
   if (!savers || typeof savers !== "object") return null;
   const out = {};
-  for (const k of ["rtk", "headroom", "pxpipe", "caveman", "ponytail", "dedupMessages", "historyTrim", "summaryInject"]) {
+  for (const k of ["rtk", "headroom", "pxpipe", "caveman", "ponytail", "dedupMessages", "historyTrim", "summaryInject", "forceTruncate", "dedupImage", "dropEmpty", "capOutput"]) {
     if (typeof savers[k] === "boolean") out[k] = savers[k];
   }
   return Object.keys(out).length ? out : null;

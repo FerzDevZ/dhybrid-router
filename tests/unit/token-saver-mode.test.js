@@ -25,7 +25,7 @@ describe("applySaverMode", () => {
     expect(patch.historyTrimMaxBytes).toBeGreaterThan(0);
   });
 
-  it("full enables headroom, ponytail, trim and summary", () => {
+  it("full enables headroom, ponytail, trim, summary and v2 truncation savers", () => {
     const patch = applySaverMode("full");
     expect(patch.rtkEnabled).toBe(true);
     expect(patch.headroomEnabled).toBe(true);
@@ -34,6 +34,10 @@ describe("applySaverMode", () => {
     expect(patch.historyTrimMaxBytes).toBeGreaterThan(0);
     expect(patch.summaryInject).toBe(true);
     expect(patch.cavemanEnabled).toBe(false);
+    expect(patch.forceTruncateBytes).toBeGreaterThan(0);
+    expect(patch.dedupImageContent).toBe(true);
+    expect(patch.dropEmptyMessages).toBe(true);
+    expect(patch.capOutputTokens).toBeUndefined(); // full does not cap output
   });
 
   it("ultra (Super-Power) enables everything with aggressive thresholds", () => {
@@ -50,6 +54,10 @@ describe("applySaverMode", () => {
     expect(patch.headroomCodeAware).toBe(true);
     expect(patch.headroomKompress).toBe(true);
     expect(patch.headroomMinBytes).toBeLessThan(4096);
+    expect(patch.forceTruncateBytes).toBeLessThan(applySaverMode("full").forceTruncateBytes);
+    expect(patch.dedupImageContent).toBe(true);
+    expect(patch.dropEmptyMessages).toBe(true);
+    expect(patch.capOutputTokens).toBe(true);
     expect(patch.historyTrimMaxBytes).toBeLessThan(applySaverMode("full").historyTrimMaxBytes);
     expect(patch.summaryInjectAboveBytes).toBeLessThan(applySaverMode("full").summaryInjectAboveBytes);
   });

@@ -14,8 +14,8 @@ export const SAVER_MODE_LABELS = {
 export const SAVER_MODE_DESCRIPTIONS = {
   off: "Semua saver mati — request dikirim apa adanya.",
   lite: "Hemat ringan & aman: RTK + dedup pesan + history trim (60KB).",
-  full: "Seimbang & kuat: RTK + Headroom + Ponytail + dedup + trim (45KB) + summary (90KB).",
-  ultra: "Super-Power — semua saver + PXPIPE + headroom code-aware/kompress + advisor. Paling agresif.",
+  full: "Seimbang & kuat: RTK + Headroom + Ponytail + dedup + trim (45KB) + summary (90KB) + force-truncate tool (40KB) + dedup gambar.",
+  ultra: "Super-Power — semua saver + PXPIPE + headroom code-aware/kompress + advisor + force-truncate (30KB) + cap output. Paling agresif.",
 };
 
 export const MODE_PRESETS = {
@@ -52,6 +52,9 @@ export const MODE_PRESETS = {
     summaryInject: true,
     summaryInjectAboveBytes: 90000,
     headroomCompressUserMessages: false,
+    forceTruncateBytes: 40000,
+    dedupImageContent: true,
+    dropEmptyMessages: true,
   },
   ultra: {
     rtkEnabled: true,
@@ -73,6 +76,10 @@ export const MODE_PRESETS = {
     headroomCodeAware: true,
     headroomKompress: true,
     tokenSaverAdvisor: true,
+    forceTruncateBytes: 30000,
+    dedupImageContent: true,
+    dropEmptyMessages: true,
+    capOutputTokens: true,
   },
 };
 
