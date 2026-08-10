@@ -50,10 +50,17 @@ function forwardedHeaders(request, target) {
 }
 
 function rewriteDashboardHtml(html) {
-  return html.replace(
-    /fetch\('(?=\/(?:stats|health|stats-history|transformations\/feed))/g,
-    `fetch('${DASHBOARD_PREFIX}`,
-  );
+  return html
+    // Asset tags reference /dashboard/static/* absolutely — re-point to our proxy mount.
+    .replace(
+      /((?:src|href)=")\/dashboard\//g,
+      `$1${DASHBOARD_PREFIX}/dashboard/`,
+    )
+    // Inline JS fetches share the same absolute /dashboard-relative paths.
+    .replace(
+      /fetch\('(?=\/(?:stats|health|stats-history|stats-lifetime|transformations\/feed|dashboard\/settings))/g,
+      `fetch('${DASHBOARD_PREFIX}`,
+    );
 }
 
 async function proxy(request, { params }) {
@@ -78,7 +85,7 @@ async function proxy(request, { params }) {
       if (HOP_BY_HOP_HEADERS.has(header.toLowerCase())) headers.delete(header);
     }
 
-    if (path.join("/") === "dashboard") {
+    if (path[0] === "dashboard" && path.length <= 2) {
       const contentType = response.headers.get("content-type") || "";
       if (contentType.includes("text/html")) {
         headers.delete("content-length");
