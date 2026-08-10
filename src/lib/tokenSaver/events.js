@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { PXPIPE_DIR } from "@/lib/pxpipe/install.js";
+import { estimateCostSaved } from "./pricing.js";
 
 const TOKEN_SAVER_DIR = path.join(PXPIPE_DIR, "..", "token-saver");
 const EVENTS_FILE = path.join(TOKEN_SAVER_DIR, "events.jsonl");

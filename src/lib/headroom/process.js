@@ -99,6 +99,11 @@ export async function startHeadroomProxy({ port = DEFAULT_PORT, codeAware = fals
       fs.closeSync(outFd);
       const e = new Error(`headroom proxy exited early (code=${code}) — see proxy.log`);
       e.code = "EARLY_EXIT";
+      // Attach actionable diagnosis: the proxy log tail + whether the [proxy]
+      // extra is missing (the CLI checks metadata, so pip show must be consulted).
+      const logTail = getHeadroomLogTail(15);
+      e.logTail = logTail;
+      e.depsMissing = /proxy dependencies not installed/i.test(logTail) || /pip install headroom-ai\[proxy\]/i.test(logTail);
       reject(e);
     });
   });
@@ -181,31 +186,41 @@ export async function installHeadroomExtras(extras = []) {
   // ['proxy', ...requested]. No shell interpolation.
   const extrasList = ["proxy", ...requested].join(",");
   const spec = `headroom-ai[${extrasList}]`;
-  const args = ["-m", "pip", "install", "--upgrade", spec];
 
   ensureDir();
   // Truncate ("w") so the log reflects only the current install for live progress.
   const outFd = fs.openSync(INSTALL_LOG_FILE, "w");
-  const child = spawn(py, args, {
-    stdio: ["ignore", outFd, outFd],
-    windowsHide: true,
-    env: { ...process.env },
+
+  // PEP 668 (Debian/Ubuntu "externally-managed-environment") blocks `pip install`
+  // into system Pythons; retry into the user site with --break-system-packages.
+  const runPip = (extraArgs) => new Promise((resolve) => {
+    const child = spawn(py, ["-m", "pip", "install", "--upgrade", "--user", ...extraArgs, spec], {
+      stdio: ["ignore", outFd, outFd],
+      windowsHide: true,
+      env: { ...process.env },
+    });
+    child.once("error", (e) => resolve({ code: -1, error: e }));
+    child.once("exit", (code) => resolve({ code }));
   });
 
-  return new Promise((resolve, reject) => {
-    child.once("error", (e) => { fs.closeSync(outFd); reject(e); });
-    child.once("exit", (code) => {
-      fs.closeSync(outFd);
-      if (code === 0) {
-        const status = getInstalledHeadroomExtras(py);
-        resolve({ success: true, code, spec, extras: requested, ...status });
-      } else {
-        const err = new Error(`pip install exited with code=${code} — see headroom/install.log`);
-        err.code = "INSTALL_FAILED";
-        reject(err);
-      }
-    });
-  });
+  let result = await runPip([]);
+  if (result.code !== 0) {
+    let logText = "";
+    try { logText = fs.readFileSync(INSTALL_LOG_FILE, "utf8"); } catch { /* fresh log */ }
+    if (/externally-managed-environment/i.test(logText)) {
+      fs.ftruncateSync(outFd, 0);
+      result = await runPip(["--break-system-packages"]);
+    }
+  }
+  fs.closeSync(outFd);
+
+  if (result.code === 0) {
+    const status = getInstalledHeadroomExtras(py);
+    return { success: true, code: result.code, spec, extras: requested, ...status };
+  }
+  const err = new Error(`pip install exited with code=${result.code} — see headroom/install.log`);
+  err.code = "INSTALL_FAILED";
+  throw err;
 }
 
 // Uninstall the marker packages that back a single extra (e.g. `ml` → torch,

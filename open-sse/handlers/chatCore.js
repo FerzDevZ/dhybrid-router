@@ -13,7 +13,7 @@ import { HTTP_STATUS, TOKEN_SAVER_HEADER } from "../config/runtimeConfig.js";
 import { handleBypassRequest } from "../utils/bypassHandler.js";
 import { trackPendingRequest, appendRequestLog, saveRequestDetail, saveRequestUsage } from "@/lib/usageDb.js";
 import { appendTokenSaverEvent } from "@/lib/tokenSaver/events.js";
-import { planTokenSaver, estimateBodyBytes, PLAN_MATCH_NONE } from "@/lib/tokenSaver/planner.js";
+import { planTokenSaver, estimateBodyBytes, PLAN_MATCH_NONE, enforcePlanBudget } from "@/lib/tokenSaver/planner.js";
 import { getExecutor } from "../executors/index.js";
 import { supportsGrokCliReasoningEffort } from "../config/grokCli.js";
 import { buildRequestDetail, extractRequestConfig } from "./chatCore/requestDetail.js";
@@ -249,11 +249,22 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     payloadBytes: estimateBodyBytes(translatedBody),
   }, settings);
   const planSavers = saverPlan?.savers; // null → inherit global toggles
-  const rtkEnabledEff = planSavers ? !!planSavers.rtk : rtkEnabled;
-  const headroomEnabledEff = planSavers ? !!planSavers.headroom : headroomEnabled;
-  const cavemanEnabledEff = planSavers ? !!planSavers.caveman : cavemanEnabled;
-  const ponytailEnabledEff = planSavers ? !!planSavers.ponytail : ponytailEnabled;
+  let rtkEnabledEff = planSavers ? !!planSavers.rtk : rtkEnabled;
+  let headroomEnabledEff = planSavers ? !!planSavers.headroom : headroomEnabled;
+  let cavemanEnabledEff = planSavers ? !!planSavers.caveman : cavemanEnabled;
+  let ponytailEnabledEff = planSavers ? !!planSavers.ponytail : ponytailEnabled;
   const pxpipeEnabledEff = planSavers ? !!planSavers.pxpipe : pxpipeEnabled;
+  // Plan-level per-request token budget: when the request exceeds it, force the
+  // aggressive savers on instead of blocking (recorded as plan-over-budget).
+  const planBudget = enforcePlanBudget(saverPlan, translatedBody);
+  let budgetDecisionEff = budgetDecision || null;
+  if (planBudget.overBudget) {
+    budgetDecisionEff = "plan-over-budget";
+    rtkEnabledEff = true;
+    headroomEnabledEff = true;
+    cavemanEnabledEff = cavemanLevel ? true : cavemanEnabledEff;
+    log?.info?.("TOKEN-SAVER", `plan ${saverPlan.planId} over budget est=${planBudget.estimatedTokens} > ${saverPlan.budgetTokens} → aggressive savers`);
+  }
   if (saverPlan?.planId && saverPlan.planId !== PLAN_MATCH_NONE) {
     log?.info?.("TOKEN-SAVER", `plan=${saverPlan.planId} reason=${saverPlan.reason} savers=${JSON.stringify(planSavers || "global")} budget=${saverPlan.budgetTokens ?? "-"} degradeTo=${saverPlan.degradeTo || "-"}`);
   }
@@ -265,7 +276,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   // Headroom: optional external proxy compression; fail open if proxy is absent.
   const headroomDiagnostics = {};
-  const headroomStats = await compressWithHeadroom(translatedBody, { enabled: tokenSaverEnabled && headroomEnabledEff, url: headroomUrl, model: upstreamModel, format: finalFormat, compressUserMessages: headroomCompressUserMessages, diagnostics: headroomDiagnostics });
+  const headroomStats = await compressWithHeadroom(translatedBody, { enabled: tokenSaverEnabled && headroomEnabledEff, url: headroomUrl, model: upstreamModel, format: finalFormat, compressUserMessages: headroomCompressUserMessages, minBytes: settings?.headroomMinBytes ?? 4096, diagnostics: headroomDiagnostics });
   const headroomLine = formatHeadroomLog(headroomStats);
   const headroomSizeLine = formatHeadroomSizeLog(headroomDiagnostics);
   if (headroomLine) {

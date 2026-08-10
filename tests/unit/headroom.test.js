@@ -17,6 +17,23 @@ describe("compressWithHeadroom", () => {
     expect(body.messages[0].content).toBe("hello");
   });
 
+  it("fast-paths small payloads below minBytes without a network call", async () => {
+    global.fetch = vi.fn();
+    const body = { messages: [{ role: "user", content: "tiny" }] };
+    const diagnostics = {};
+
+    const stats = await compressWithHeadroom(body, {
+      enabled: true,
+      url: "http://localhost:8787",
+      minBytes: 4096,
+      diagnostics,
+    });
+
+    expect(stats).toBeNull();
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(diagnostics.reason).toContain("headroomMinBytes");
+  });
+
   it("compresses messages in-place", async () => {
     global.fetch = vi.fn(async () => new Response(JSON.stringify({
       messages: [{ role: "user", content: "short" }],

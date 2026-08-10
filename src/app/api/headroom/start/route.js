@@ -29,7 +29,13 @@ export async function POST() {
     });
     return NextResponse.json({ success: true, ...result });
   } catch (error) {
-    const status = error.code === "NOT_INSTALLED" ? 400 : 500;
-    return NextResponse.json({ error: error.message, code: error.code || null }, { status });
+    const isDepsMissing = error.code === "EARLY_EXIT" && error.depsMissing === true;
+    const status = isDepsMissing ? 400 : (error.code === "NOT_INSTALLED" ? 400 : 500);
+    return NextResponse.json({
+      error: error.message,
+      code: error.code || null,
+      depsMissing: error.depsMissing === true,
+      logTail: error.logTail || null,
+    }, { status });
   }
 }

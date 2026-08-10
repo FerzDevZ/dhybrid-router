@@ -79,6 +79,7 @@ function exportTokenSaverStatsCsv(stats) {
 export default function TokenSaverClient() {
   const [rtkEnabled, setRtkEnabledState] = useState(true);
   const [headroomEnabled, setHeadroomEnabled] = useState(false);
+  const [headroomMinBytes, setHeadroomMinBytes] = useState(4096);
   const [headroomUrl, setHeadroomUrl] = useState("http://localhost:8787");
   const [headroomStatus, setHeadroomStatus] = useState({
     installed: false,
@@ -90,6 +91,9 @@ export default function TokenSaverClient() {
     useState(false);
   const [headroomActionLoading, setHeadroomActionLoading] = useState(false);
   const [headroomActionError, setHeadroomActionError] = useState("");
+  const [headroomDepsMissing, setHeadroomDepsMissing] = useState(false);
+  const [headroomLogTail, setHeadroomLogTail] = useState("");
+  const [headroomLogOpen, setHeadroomLogOpen] = useState(false);
   const [headroomExtras, setHeadroomExtras] = useState({
     version: null,
     extras: { code: false, ml: false },
@@ -254,6 +258,7 @@ export default function TokenSaverClient() {
       });
       const data = await res.json();
       setHeadroomStatus({ ...data, loading: false });
+      setHeadroomDepsMissing(data.depsMissing === true);
       if (!data?.installed) {
         setHeadroomExtras({
           version: null,
@@ -306,11 +311,16 @@ export default function TokenSaverClient() {
 
   const handleHeadroomStart = useCallback(async () => {
     setHeadroomActionError("");
+    setHeadroomDepsMissing(false);
     setHeadroomActionLoading(true);
     try {
       const res = await fetch("/api/headroom/start", { method: "POST" });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || "Failed to start proxy");
+      if (!res.ok) {
+        setHeadroomDepsMissing(data.depsMissing === true);
+        if (data.logTail) setHeadroomLogTail(data.logTail);
+        throw new Error(data.error || "Failed to start proxy");
+      }
       await refreshHeadroomStatus();
     } catch (e) {
       setHeadroomActionError(e.message);
@@ -360,6 +370,32 @@ export default function TokenSaverClient() {
   }, []);
 
   useEffect(() => () => stopLogPolling(), [stopLogPolling]);
+
+  // Install only the base [proxy] extra (headroom-ai[proxy]) — the CLI refuses
+  // to run when the proxy server module cannot be imported (e.g. mixed/partial
+  // installs where an old `headroom` package shares the module folder).
+  const installProxyDeps = useCallback(async () => {
+    setExtrasActionLoading(true);
+    setExtrasActionError("");
+    startLogPolling();
+    try {
+      const res = await fetch("/api/headroom/extras", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ extras: [] }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Install failed");
+      setHeadroomDepsMissing(false);
+      setHeadroomActionError("");
+      await refreshHeadroomStatus();
+    } catch (e) {
+      setExtrasActionError(e.message);
+    } finally {
+      stopLogPolling();
+      setExtrasActionLoading(false);
+    }
+  }, [startLogPolling, stopLogPolling, refreshHeadroomStatus]);
 
   const installExtrasConfirmed = useCallback(async () => {
     if (pendingExtras.length === 0) return;
@@ -537,6 +573,7 @@ export default function TokenSaverClient() {
           const data = await res.json();
           setRtkEnabledState(data.rtkEnabled !== false);
           setHeadroomEnabled(!!data.headroomEnabled);
+          if (typeof data.headroomMinBytes === "number") setHeadroomMinBytes(data.headroomMinBytes);
           setHeadroomUrl(data.headroomUrl || "http://localhost:8787");
           setCodeAware(data.headroomCodeAware === true);
           setKompress(data.headroomKompress !== false);
@@ -697,11 +734,13 @@ export default function TokenSaverClient() {
     ? "Checking…"
     : headroomRunning
       ? "Running"
-      : headroomStatus.localUrl !== false && !headroomStatus.installed
-        ? "Not installed"
-        : headroomStatus.localUrl !== false
-          ? "Stopped"
-          : "External";
+      : headroomStatus.proxyDepsOk === false
+        ? "Missing deps"
+        : headroomStatus.localUrl !== false && !headroomStatus.installed
+          ? "Not installed"
+          : headroomStatus.localUrl !== false
+            ? "Stopped"
+            : "External";
   const headroomLocalUrl = headroomStatus.localUrl !== false;
   const headroomCanStart = !!headroomStatus.canStart;
   const headroomManaged =
@@ -752,6 +791,13 @@ export default function TokenSaverClient() {
                 subtitle={(tokenSaverStats.byPlan || []).map((p) => p.planId).join(", ") || "none"}
                 icon="route"
                 color="info"
+              />
+              <StatCard
+                title="≈ Saved (USD)"
+                value={`$${(tokenSaverStats.costSavedUSD || 0) >= 1 ? (tokenSaverStats.costSavedUSD || 0).toFixed(2) : (tokenSaverStats.costSavedUSD || 0).toFixed(4)}`}
+                subtitle="input-side pricing estimate"
+                icon="savings"
+                color="warning"
               />
               <StatCard
                 title="RTK Saved"
@@ -1352,6 +1398,43 @@ export default function TokenSaverClient() {
           )}
           {headroomActionError && (
             <p className="text-sm text-warning">{headroomActionError}</p>
+          )}
+          {headroomDepsMissing && (
+            <div className="flex flex-col gap-2 rounded border border-warning/40 bg-warning/5 p-3">
+              <p className="text-sm font-medium text-warning">
+                Missing Headroom [proxy] dependencies
+              </p>
+              <p className="text-xs text-text-muted">
+                The CLI refuses to start without the <code>headroom-ai[proxy]</code>{" "}
+                extra in its metadata (fastapi/uvicorn may already be importable —
+                the check is metadata-based). Install it, then Start again.
+              </p>
+              <div className="flex items-center gap-2">
+                <Button size="sm" onClick={installProxyDeps} disabled={extrasActionLoading}>
+                  {extrasActionLoading ? "Installing…" : "Install [proxy] deps"}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setHeadroomLogOpen(!headroomLogOpen);
+                    if (!headroomLogOpen && !headroomLogTail) {
+                      fetch("/api/headroom/log?lines=40")
+                        .then((r) => r.json())
+                        .then((d) => setHeadroomLogTail(d.log || ""))
+                        .catch(() => {});
+                    }
+                  }}
+                >
+                  {headroomLogOpen ? "Hide log" : "View proxy.log"}
+                </Button>
+              </div>
+              {headroomLogOpen && (
+                <pre className="max-h-40 overflow-auto rounded bg-black/5 dark:bg-white/5 p-2 text-[11px] font-mono whitespace-pre-wrap">
+                  {headroomLogTail || "proxy.log is empty"}
+                </pre>
+              )}
+            </div>
           )}
           <div className="flex gap-2">
             <Button

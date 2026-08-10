@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { planTokenSaver, PLAN_MATCH_NONE, estimateBodyBytes } from "@/lib/tokenSaver/planner.js";
+import { planTokenSaver, PLAN_MATCH_NONE, estimateBodyBytes, enforcePlanBudget } from "@/lib/tokenSaver/planner.js";
 import { checkBudget, suggestDegrade } from "@/lib/tokenSaver/budgetGuard.js";
+import { estimateCostSaved, modelPricing, formatUSD } from "@/lib/tokenSaver/pricing.js";
 
 describe("token saver planner", () => {
   it("matches custom plan by model regex + min payload", () => {
@@ -78,5 +79,50 @@ describe("budget guard", () => {
     expect(suggestDegrade("claude-sonnet-4-5")).toBe("claude-3-5-haiku");
     expect(suggestDegrade("unknown-model")).toBeNull();
     expect(suggestDegrade("gpt-4o", { degradeTo: "custom-cheap" })).toBe("custom-cheap");
+  });
+});
+
+describe("plan budget enforcement", () => {
+  it("flags over-budget requests and passes small ones", () => {
+    const body = { messages: [{ role: "user", content: "x".repeat(8000) }] };
+    const over = enforcePlanBudget({ budgetTokens: 500 }, body);
+    expect(over.overBudget).toBe(true);
+    expect(over.estimatedTokens).toBeGreaterThan(500);
+    const ok = enforcePlanBudget({ budgetTokens: 1e9 }, body);
+    expect(ok.overBudget).toBe(false);
+  });
+
+  it("ignores plans without a budget", () => {
+    expect(enforcePlanBudget({}, {}).overBudget).toBe(false);
+    expect(enforcePlanBudget(null, {}).overBudget).toBe(false);
+  });
+});
+
+describe("cost estimate", () => {
+  it("matches known models and falls back", () => {
+    expect(modelPricing("gpt-4o").in).toBe(2.5);
+    expect(modelPricing("claude-sonnet-4-5").in).toBe(3);
+    expect(modelPricing("zzz-unknown").in).toBe(1.5);
+  });
+
+  it("estimates USD saved from rtk bytes + headroom tokens + pxpipe", () => {
+    const ev = {
+      model: "gpt-4o",
+      rtk: { hits: [1], bytesBefore: 200000, bytesAfter: 40000 }, // 160000 B / 4 = 40k tok
+      headroom: { tokens_saved: 10000 },
+      pxpipe: { applied: true, tokensSavedEst: 5000 },
+    };
+    const saved = estimateCostSaved(ev);
+    expect(saved).toBeCloseTo(((40000 + 10000 + 5000) / 1e6) * 2.5, 8);
+  });
+
+  it("returns 0 for events without concrete saver counts", () => {
+    expect(estimateCostSaved({ model: "gpt-4o", caveman: { applied: true } })).toBe(0);
+    expect(estimateCostSaved(null)).toBe(0);
+  });
+
+  it("formats USD thresholds", () => {
+    expect(formatUSD(0.00005)).toBe("$0.0001");
+    expect(formatUSD(1.234)).toBe("$1.23");
   });
 });

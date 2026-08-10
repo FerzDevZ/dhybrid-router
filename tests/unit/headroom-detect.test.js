@@ -15,13 +15,46 @@ vi.mock("child_process", () => ({
   execFileSync: mocks.execFileSync,
 }));
 
-import { findPython310, getHeadroomStatus, getInstalledHeadroomExtras, isLoopbackHeadroomUrl } from "../../src/lib/headroom/detect.js";
+import { findPython310, getHeadroomStatus, getInstalledHeadroomExtras, isLoopbackHeadroomUrl, checkProxyDepsOk } from "../../src/lib/headroom/detect.js";
 
 afterEach(() => {
   vi.clearAllMocks();
+  // Restore the hoisted default implementations — clearAllMocks only clears
+  // call history, and the deps-probe tests above override mockImplementation.
+  mocks.execFileSync.mockImplementation(() => Buffer.from(JSON.stringify([
+    { name: "headroom-ai", version: "0.26.0" },
+    { name: "tree-sitter", version: "0.25.0" },
+  ])));
+  mocks.execSync.mockImplementation(() => { throw new Error("not found"); });
 });
 
 describe("headroom detect", () => {
+  it("proxy deps ok when the proxy server module imports", () => {
+    mocks.execSync.mockImplementation((cmd) => {
+      if (String(cmd).includes("where") || String(cmd).includes("which")) return Buffer.from("/opt/hr/bin/headroom\n");
+      if (String(cmd).includes("--version")) return Buffer.from("Python 3.13.0\n");
+      throw new Error("unexpected execSync");
+    });
+    mocks.execFileSync.mockImplementation((py, args) => {
+      if (args.join(" ") === "-m pip show headroom-ai") return Buffer.from("Name: headroom-ai\nVersion: 0.34.0\n");
+      if (args.join(" ") === "-c from headroom.proxy.server import run_server") return Buffer.from("");
+      throw new Error(`unexpected execFileSync: ${py} ${args.join(" ")}`);
+    });
+    expect(checkProxyDepsOk()).toBe(true);
+  });
+
+  it("proxy deps broken when the proxy server import throws", () => {
+    mocks.execSync.mockImplementation((cmd) => {
+      if (String(cmd).includes("where") || String(cmd).includes("which")) return Buffer.from("/opt/hr/bin/headroom\n");
+      if (String(cmd).includes("--version")) return Buffer.from("Python 3.13.0\n");
+      throw new Error("unexpected execSync");
+    });
+    mocks.execFileSync.mockImplementation((py, args) => {
+      if (args.join(" ") === "-m pip show headroom-ai") return Buffer.from("Name: headroom-ai\nVersion: 0.34.0\n");
+      throw new Error(`import missing: ${args.join(" ")}`);
+    });
+    expect(checkProxyDepsOk()).toBe(false);
+  });
   it("detects installed headroom version and extras from pip list", () => {
     const result = getInstalledHeadroomExtras("python3");
 

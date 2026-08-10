@@ -3,8 +3,20 @@
 // (settings.tokenSaverPlans). Falls back to global toggles when no plan
 // matches. Pure + sync → unit-testable without DB.
 import { detectFormatByEndpoint, FORMATS } from "../../../open-sse/translator/formats.js";
+import { estimateRequestTokens } from "./budgetGuard.js";
 
 export const PLAN_MATCH_NONE = "none";
+
+// When a plan carries a per-request token budget, requests above it get the
+// aggressive saver treatment (rtk+headroom+caveman forced on). Pure check —
+// chatCore decides what to enable and records the decision in events.
+export function enforcePlanBudget(plan, body) {
+  if (!plan || typeof plan.budgetTokens !== "number" || plan.budgetTokens <= 0) {
+    return { overBudget: false, estimatedTokens: null };
+  }
+  const estimatedTokens = estimateRequestTokens(body);
+  return { overBudget: estimatedTokens > plan.budgetTokens, estimatedTokens };
+}
 
 // Small helpers kept here so callers (chatCore, tests) don't need to know
 // the matching internals.

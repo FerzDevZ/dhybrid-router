@@ -120,6 +120,27 @@ export function findPython310() {
   return fallback;
 }
 
+// True when the headroom proxy server module imports cleanly. The CLI itself
+// fails with "Proxy dependencies not installed" when this import throws, so
+// this probe matches its real gate — and also catches mixed/partial installs
+// (e.g. an old `headroom` package sharing the same module folder).
+export function checkProxyDepsOk() {
+  const py = findPython310();
+  const bin = findHeadroomBinary();
+  if (!py || !bin) return false;
+  try {
+    execFileSync(py, ["-c", "from headroom.proxy.server import run_server"], {
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+      timeout: HEADROOM_PIP_TIMEOUT_MS,
+      env: { ...process.env, PATH: EXTENDED_PATH },
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Probe whether a Headroom proxy is reachable at the given URL by hitting /health.
 export async function probeProxyRunning(url) {
   if (!url) return false;
@@ -146,6 +167,7 @@ export async function getHeadroomStatus(url) {
   const path = findHeadroomBinary();
   const python = findPython310();
   const installed = Boolean(path);
+  const proxyDepsOk = installed && checkProxyDepsOk();
   const running = await probeProxyRunning(url);
   const localUrl = isLoopbackHeadroomUrl(url);
   const extrasStatus = installed ? getInstalledHeadroomExtras(python) : { installed: false, version: null, extras: { code: false, ml: false } };
@@ -155,7 +177,9 @@ export async function getHeadroomStatus(url) {
     running,
     python,
     localUrl,
-    canStart: installed && localUrl,
+    canStart: installed && localUrl && proxyDepsOk,
+    proxyDepsOk,
+    depsMissing: installed && !proxyDepsOk,
     version: extrasStatus.version,
     extras: extrasStatus.extras,
   };
