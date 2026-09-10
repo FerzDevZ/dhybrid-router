@@ -131,11 +131,14 @@ function cacheGet(key) {
     compressionCache.delete(key);
     return null;
   }
+  // LRU: bump recency
+  compressionCache.delete(key);
+  compressionCache.set(key, entry);
   return entry.value;
 }
 
 function cacheSet(key, value) {
-  // Evict oldest if over cap
+  if (compressionCache.has(key)) compressionCache.delete(key);
   if (compressionCache.size >= CACHE_MAX_ENTRIES) {
     const firstKey = compressionCache.keys().next().value;
     compressionCache.delete(firstKey);
@@ -144,13 +147,20 @@ function cacheSet(key, value) {
 }
 
 function hashText(text) {
-  // Quick hash for cache key
+  // Use crypto hash to avoid collisions — fallback to djb2 if crypto unavailable (e.g. edge)
+  try {
+    const crypto = globalThis.crypto || require("node:crypto");
+    if (crypto && crypto.createHash) {
+      return crypto.createHash("sha256").update(text).digest("hex").slice(0, 16);
+    }
+    if (crypto && crypto.subtle) return String(text.length) + ":" + text.slice(0, 64);
+  } catch {}
   let hash = 0;
   for (let i = 0; i < text.length; i++) {
     hash = ((hash << 5) - hash) + text.charCodeAt(i);
     hash |= 0;
   }
-  return hash.toString(36);
+  return "dj:" + hash.toString(36) + ":" + text.length;
 }
 
 function compressText(text, stats, shape) {

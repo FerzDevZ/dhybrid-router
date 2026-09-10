@@ -255,8 +255,9 @@ function isSocksUrl(proxyUrl) {
 
 // ── Per-pool concurrency semaphore (E3) ─────────────────────────
 const poolSlots = new Map(); // poolId -> { inflight, waiters }
+const SLOT_WAIT_TIMEOUT_MS = 30000;
 
-async function acquireSlot(poolId, max) {
+async function acquireSlot(poolId, max, signal) {
   if (!poolId || !max || max < 1) return;
   let entry = poolSlots.get(poolId);
   if (!entry) {
@@ -267,8 +268,37 @@ async function acquireSlot(poolId, max) {
     entry.inflight += 1;
     return;
   }
-  await new Promise((resolve) => {
-    entry.waiters.push({ resolve });
+  await new Promise((resolve, reject) => {
+    let timeoutId;
+    const waiter = { resolve, reject };
+    const cleanup = () => {
+      clearTimeout(timeoutId);
+      if (signal) signal.removeEventListener("abort", onAbort);
+      const idx = entry.waiters.indexOf(waiter);
+      if (idx !== -1) entry.waiters.splice(idx, 1);
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(Object.assign(new Error("Acquire slot aborted"), { name: "AbortError" }));
+    };
+    waiter.resolve = () => {
+      cleanup();
+      resolve();
+    };
+    waiter.reject = (e) => {
+      cleanup();
+      reject(e);
+    };
+    entry.waiters.push(waiter);
+    timeoutId = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Pool ${poolId} acquire timeout after ${SLOT_WAIT_TIMEOUT_MS}ms`));
+    }, SLOT_WAIT_TIMEOUT_MS);
+    timeoutId.unref?.();
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
   });
   entry.inflight += 1; // slot granted by releaseSlot
 }
@@ -350,8 +380,20 @@ async function socksFetch(targetUrl, options, socksUrl) {
       if (SOCKS_CONN_ERRORS.has(err?.code)) evictSocksAgent(socksUrl);
       reject(err);
     });
+    if (options.signal) {
+      const onAbort = () => {
+        req.destroy(Object.assign(new Error("Request aborted"), { name: "AbortError" }));
+        reject(Object.assign(new Error("AbortError"), { name: "AbortError" }));
+      };
+      if (options.signal.aborted) onAbort();
+      else options.signal.addEventListener("abort", onAbort, { once: true });
+    }
     if (options.body != null && options.body !== "") {
-      req.write(typeof options.body === "string" ? options.body : JSON.stringify(options.body));
+      if (typeof options.body === "string" || Buffer.isBuffer(options.body) || options.body instanceof Uint8Array) {
+        req.write(options.body);
+      } else {
+        req.write(JSON.stringify(options.body));
+      }
     }
     req.end();
   });
@@ -541,8 +583,8 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
     if (plan.kind === "direct" || plan.kind === "bypass") return plan.run();
 
     try {
-      // Per-pool concurrency cap (E3) — 0 = unlimited
-      if (plan.poolId) await acquireSlot(plan.poolId, Number(currentProxyOptions?.poolMaxConcurrency) || 0);
+      // Per-pool concurrency cap (E3) — 0 = unlimited, abort-aware with 30s timeout
+      if (plan.poolId) await acquireSlot(plan.poolId, Number(currentProxyOptions?.poolMaxConcurrency) || 0, options.signal);
       return await timedProxyFetch(plan.poolId, plan.run);
     } catch (err) {
       if (plan.poolId) tried.add(plan.poolId);

@@ -3,7 +3,16 @@ import { createProxyPool } from "@/models";
 
 const DENO_V2_API = "https://api.deno.com/v2";
 
-const DENO_RELAY_CODE = `Deno.serve(async (request) => {
+const DENO_RELAY_CODE = `const ALLOWED_HOSTS = ["api.openai.com","api.anthropic.com","generativelanguage.googleapis.com","api.mistral.ai","api.groq.com","api.together.xyz","api.fireworks.ai","api.perplexity.ai","api.github.com","api.individual.githubcopilot.com","opencode.ai"];
+function isAllowedTarget(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    if (!["http:","https:"].includes(u.protocol)) return false;
+    if (/^(127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.|169\\.254\\.|::1$)/.test(u.hostname)) return false;
+    return ALLOWED_HOSTS.some(h => u.hostname === h || u.hostname.endsWith("."+h));
+  } catch { return false; }
+}
+Deno.serve(async (request) => {
   const target = request.headers.get("x-relay-target");
   const relayPath = request.headers.get("x-relay-path") || "/";
 
@@ -15,6 +24,9 @@ const DENO_RELAY_CODE = `Deno.serve(async (request) => {
   }
 
   const targetUrl = target.replace(/\\/$/, "") + relayPath;
+  if (!isAllowedTarget(targetUrl)) {
+    return new Response(JSON.stringify({ error: "Target not allowed" }), { status: 403, headers: { "content-type": "application/json" } });
+  }
   const newHeaders = new Headers(request.headers);
   newHeaders.delete("x-relay-target");
   newHeaders.delete("x-relay-path");

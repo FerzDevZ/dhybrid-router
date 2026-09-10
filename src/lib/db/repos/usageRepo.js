@@ -26,6 +26,7 @@ if (!global._pendingTimers) global._pendingTimers = {};
 if (!global._recentRing) global._recentRing = { items: [], initialized: false };
 if (!global._connectionMapCache) global._connectionMapCache = { map: {}, ts: 0 };
 if (!global._statsEmitTimers) global._statsEmitTimers = { pending: null, update: null };
+if (!global._usageStatsCache) global._usageStatsCache = { data: {}, ts: {} };
 
 const pendingRequests = global._pendingRequests;
 const lastErrorProvider = global._lastErrorProvider;
@@ -308,6 +309,11 @@ export async function saveRequestUsage(entry) {
 
     if (inserted) {
       pushToRing(entry);
+      // Invalidate stats cache — new data changes every period
+      if (global._usageStatsCache) {
+        global._usageStatsCache.data = {};
+        global._usageStatsCache.ts = {};
+      }
       scheduleStatsEvent("update", 250);
     }
   } catch (e) {
@@ -359,7 +365,12 @@ function loadDaysInRange(adapter, maxDays) {
   return adapter.all(`SELECT dateKey, data FROM usageDaily WHERE dateKey >= ?`, [cutoffKey]);
 }
 
+const USAGE_STATS_TTL_MS = 3000;
 export async function getUsageStats(period = "all") {
+  const cached = global._usageStatsCache;
+  if (cached.data[period] && Date.now() - (cached.ts[period] || 0) < USAGE_STATS_TTL_MS) {
+    return cached.data[period];
+  }
   const db = await getAdapter();
 
   const [{ getProviderConnections }, { getApiKeys }, { getProviderNodes }] = await Promise.all([
@@ -693,6 +704,8 @@ export async function getUsageStats(period = "all") {
   stats.errorRate = histAll.length ? errorCount / histAll.length : 0;
 
   stats.totalRequests = Object.values(stats.byProvider).reduce((sum, p) => sum + (p.requests || 0), 0);
+  cached.data[period] = stats;
+  cached.ts[period] = Date.now();
   return stats;
 }
 

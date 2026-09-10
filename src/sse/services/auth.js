@@ -2,7 +2,7 @@ import { getProviderConnections, validateApiKey, updateProviderConnection, getSe
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
-import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
+import { resolveProviderId, FREE_PROVIDERS, AI_PROVIDERS } from "@/shared/constants/providers.js";
 import { makeKv } from "@/lib/db/helpers/kvStore.js";
 import { sendNotification } from "@/lib/notifications";
 import * as log from "../utils/logger.js";
@@ -50,7 +50,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     const providerId = resolveProviderId(provider);
 
     // Inject a virtual connection for no-auth free providers (with optional proxy pool from settings)
-    if (FREE_PROVIDERS[providerId]?.noAuth) {
+    if (AI_PROVIDERS[providerId]?.noAuth || FREE_PROVIDERS[providerId]?.noAuth) {
       const settings = await getSettings();
       const override = (settings.providerStrategies || {})[providerId] || {};
       const strategy = override.rotateStrategy || "none";
@@ -79,8 +79,10 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
           connectionNoProxy: resolvedProxy.connectionNoProxy,
           connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
           connectionProxyPoolIds: poolIdsForFailover,
-          poolMaxFailover: resolvedProxy.maxFailover ?? 2,
-          poolAllowFallbackDirect: resolvedProxy.allowFallbackDirect !== false,
+          poolMaxFailover: override.maxFailover ?? resolvedProxy.maxFailover ?? (poolIdsForFailover.length > 0 ? Math.min(poolIdsForFailover.length, 6) : 2),
+          poolAllowFallbackDirect: override.allowFallbackDirect !== undefined
+            ? Boolean(override.allowFallbackDirect)
+            : (providerId === "opencode" && (pickedId || poolIdsForFailover.length > 0) ? false : resolvedProxy.allowFallbackDirect !== false),
           poolMaxConcurrency: resolvedProxy.maxConcurrency ?? 0,
           vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
         },

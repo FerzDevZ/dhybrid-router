@@ -7,7 +7,15 @@ const VERCEL_API = "https://api.vercel.com";
 // Forwards requests to target URL specified in x-relay-target header
 const RELAY_FUNCTION_CODE = `
 export const config = { runtime: "edge" };
-
+const ALLOWED_HOSTS = ["api.openai.com","api.anthropic.com","generativelanguage.googleapis.com","api.mistral.ai","api.groq.com","api.together.xyz","api.fireworks.ai","api.perplexity.ai","api.github.com","api.individual.githubcopilot.com","opencode.ai"];
+function isAllowedTarget(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    if (!["http:","https:"].includes(u.protocol)) return false;
+    if (/^(127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.|169\\.254\\.|::1$)/.test(u.hostname)) return false;
+    return ALLOWED_HOSTS.some(h => u.hostname === h || u.hostname.endsWith("."+h));
+  } catch { return false; }
+}
 export default async function handler(req) {
   const target = req.headers.get("x-relay-target");
   const relayPath = req.headers.get("x-relay-path") || "/";
@@ -19,6 +27,9 @@ export default async function handler(req) {
   }
 
   const targetUrl = target.replace(/\\/$/, "") + relayPath;
+  if (!isAllowedTarget(targetUrl)) {
+    return new Response(JSON.stringify({ error: "Target not allowed" }), { status: 403, headers: { "content-type": "application/json" } });
+  }
 
   const headers = new Headers(req.headers);
   headers.delete("x-relay-target");
